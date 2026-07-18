@@ -16,6 +16,7 @@ import subprocess
 import threading
 import time
 import signal
+from archive import archive_recording, ARCHIVE_ENABLED
 import gi
 
 gi.require_version("Gtk", "3.0")
@@ -130,7 +131,13 @@ def stop_recording():
         print(f"[voice-input] Error: {e}", file=sys.stderr)
         text = ""
     finally:
-        if os.path.exists(WAVFILE):
+        # 归档(独立 try,失败不影响转写/粘贴)
+        if ARCHIVE_ENABLED and text and os.path.exists(WAVFILE):
+            try:
+                archive_recording(WAVFILE, text, text)
+            except Exception as ae:
+                print(f"[voice-input] archive failed: {ae}", file=sys.stderr)
+        if os.path.exists(WAVFILE):  # 异常/归档失败 → wav 还在 → 清理
             os.unlink(WAVFILE)
 
     if text:
