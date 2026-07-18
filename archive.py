@@ -12,7 +12,7 @@ ARCHIVE_DIR = os.path.expanduser("~/.local/share/voice-input/recordings")
 ARCHIVE_ENABLED = os.environ.get("VOICE_INPUT_ARCHIVE", "1") != "0"
 
 
-def archive_recording(wav_path, raw_text, final_text, archive_dir=ARCHIVE_DIR):
+def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir: str = ARCHIVE_DIR) -> str:
     """归档一条录音:建时间戳目录,move wav,写 raw/final,追加 index.jsonl。
 
     Args:
@@ -27,11 +27,13 @@ def archive_recording(wav_path, raw_text, final_text, archive_dir=ARCHIVE_DIR):
     Raises:
         任何 IO 异常向上抛,由调用方捕获(不影响转写主流程)。
     """
-    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    rec_dir = os.path.join(archive_dir, ts)
+    now = datetime.now()
+    ts_dir = now.strftime("%Y-%m-%d_%H%M%S")   # fs-safe, 用于目录名
+    ts_iso = now.strftime("%Y-%m-%dT%H:%M:%S")  # ISO, 用于 json
+    rec_dir = os.path.join(archive_dir, ts_dir)
     seq = 1
     while os.path.exists(rec_dir):  # 同秒冲突:加序号后缀
-        rec_dir = os.path.join(archive_dir, f"{ts}_{seq}")
+        rec_dir = os.path.join(archive_dir, f"{ts_dir}_{seq}")
         seq += 1
     os.makedirs(rec_dir, exist_ok=True)
 
@@ -43,7 +45,7 @@ def archive_recording(wav_path, raw_text, final_text, archive_dir=ARCHIVE_DIR):
         f.write(final_text)
 
     record = {
-        "ts": ts,
+        "ts": ts_iso,
         "dir": os.path.basename(rec_dir),
         "audio": "audio.wav",
         "raw": raw_text,

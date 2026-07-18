@@ -54,7 +54,7 @@ nohup ./voice-ptt.sh &
 
 启动后按住 **右 Command 键**（Mac 键盘）录音，松开自动转写并输入。
 
-## 录音归档
+### 录音归档
 
 默认每次录音的音频 + 转写结果会归档到 `~/.local/share/voice-input/recordings/`（每条一目录 + `index.jsonl` 索引），供回溯与评测。关闭：`VOICE_INPUT_ARCHIVE=0 ./voice-ptt.sh`。
 
