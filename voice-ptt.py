@@ -17,6 +17,7 @@ import threading
 import time
 import signal
 from archive import archive_recording, ARCHIVE_ENABLED
+from media_pause import pause_playing, resume, PAUSE_MEDIA_ENABLED
 import gi
 
 gi.require_version("Gtk", "3.0")
@@ -34,6 +35,7 @@ recording = False
 rec_proc = None
 active_window = None
 overlay_window = None
+_paused_players = []  # 录音开始时被暂停的 MPRIS 播放器 bus name,stop 时 resume
 
 def _make_css(color_hex):
     css = f"label {{ color: {color_hex}; font: bold 13px Sans; }}"
@@ -87,7 +89,7 @@ def load_model():
 
 
 def start_recording():
-    global recording, rec_proc, active_window
+    global recording, rec_proc, active_window, _paused_players
     if recording:
         return
     recording = True
@@ -99,6 +101,12 @@ def start_recording():
         active_window = None
     if os.path.exists(WAVFILE):
         os.unlink(WAVFILE)
+    if PAUSE_MEDIA_ENABLED:
+        try:
+            _paused_players = pause_playing()
+        except Exception as pe:
+            print(f"[voice-input] pause_media failed: {pe}", file=sys.stderr)
+            _paused_players = []
     rec_proc = subprocess.Popen(
         ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-D", "hw:3", WAVFILE],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -108,7 +116,7 @@ def start_recording():
 
 
 def stop_recording():
-    global recording, rec_proc
+    global recording, rec_proc, _paused_players
     if not recording:
         return
     recording = False
@@ -116,6 +124,14 @@ def stop_recording():
         rec_proc.terminate()
         rec_proc.wait(timeout=2)
         rec_proc = None
+
+    if PAUSE_MEDIA_ENABLED and _paused_players:
+        try:
+            resume(_paused_players)
+        except Exception as re:
+            print(f"[voice-input] resume_media failed: {re}", file=sys.stderr)
+        finally:
+            _paused_players = []
 
     GLib.idle_add(hide_overlay)
     time.sleep(0.3)
