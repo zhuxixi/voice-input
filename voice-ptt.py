@@ -126,12 +126,14 @@ def stop_recording():
         rec_proc = None
 
     if PAUSE_MEDIA_ENABLED and _paused_players:
+        # 先快照再清空,然后才 resume:避免 resume 的 D-Bus 往返期间 start_recording
+        # 把 _paused_players 赋成新值后,被这里误清导致下次松手跳过 resume(CR 反馈)
+        to_resume = _paused_players
+        _paused_players = []
         try:
-            resume(_paused_players)
+            resume(to_resume)
         except Exception as re:
             print(f"[voice-input] resume_media failed: {re}", file=sys.stderr)
-        finally:
-            _paused_players = []
 
     GLib.idle_add(hide_overlay)
     time.sleep(0.3)
