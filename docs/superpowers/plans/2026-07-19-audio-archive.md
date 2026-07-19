@@ -160,10 +160,23 @@ Create `archive.py`:
 import json
 import os
 import shutil
+import sys
 from datetime import datetime
 
 ARCHIVE_DIR = os.path.expanduser("~/.local/share/voice-input/recordings")
 ARCHIVE_ENABLED = os.environ.get("VOICE_INPUT_ARCHIVE", "1") != "0"
+
+
+def _fsync_dir(path: str) -> None:
+    """best-effort fsync 目录条目(防掉电后新建文件/子目录条目未落盘)。失败忽略。"""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir: str = ARCHIVE_DIR) -> str:
@@ -202,6 +215,7 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
             if seq > 999:
                 raise RuntimeError(f"archive: same-second dir collision limit hit under {archive_dir}")
             rec_dir = os.path.join(archive_dir, f"{ts_dir}_{seq}")
+    _fsync_dir(archive_dir)  # 让 rec_dir 这个新目录条目落盘到 archive_dir(防掉电后"消失",kimi#8)
 
     record = {
         "ts": ts_iso,
@@ -228,11 +242,12 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
         if os.path.getsize(audio_dst) != os.path.getsize(wav_path):
             raise OSError("archive: wav copy incomplete (size mismatch)")
         audio_confirmed = True  # audio 数据完整确认
-        # 4. 元数据(权限/时间),失败非致命——不影响数据完整性
+        # 4. 元数据(权限/时间),失败非致命——不影响数据完整性(cc#10:记 stderr 不静默)
         try:
             shutil.copystat(wav_path, audio_dst)
-        except OSError:
-            pass
+        except OSError as cse:
+            print(f"[archive] copystat failed (non-fatal): {cse}", file=sys.stderr)
+        _fsync_dir(rec_dir)  # 让 audio.wav/raw.txt/final.txt 三个新文件条目落盘到 rec_dir(kimi#8)
         # 5. audio 完整 → 删源(此时 rec_dir 已有完整 audio)
         os.remove(wav_path)
         # 6. 记索引(flush+fsync);若此步失败,audio_confirmed=True → 保留 rec_dir
