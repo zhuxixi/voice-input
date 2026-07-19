@@ -13,7 +13,11 @@ ARCHIVE_ENABLED = os.environ.get("VOICE_INPUT_ARCHIVE", "1") != "0"
 
 
 def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir: str = ARCHIVE_DIR) -> str:
-    """归档一条录音:建时间戳目录,move wav,写 raw/final,追加 index.jsonl。
+    """归档一条录音。顺序:建目录→写文本→move wav→记索引。
+
+    回滚原则(wav 珍贵不可逆):
+    - wav move 之前的失败 → rmtree(rec_dir)(wav 还在原位,交给调用方 finally)
+    - wav move 之后的失败 → 保留 rec_dir(音频已在,索引可能缺,符合"丢索引不丢音频")
 
     Args:
         wav_path: 待归档的 wav 路径(会被 move 走)
@@ -28,16 +32,18 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
         任何 IO 异常向上抛,由调用方捕获(不影响转写主流程)。
     """
     now = datetime.now()
-    ts_dir = now.strftime("%Y-%m-%d_%H%M%S")   # fs-safe, 用于目录名
-    ts_iso = now.strftime("%Y-%m-%dT%H:%M:%S")  # ISO, 用于 json
+    ts_dir = now.strftime("%Y-%m-%d_%H%M%S")   # fs-safe, 目录名
+    ts_iso = now.strftime("%Y-%m-%dT%H:%M:%S")  # ISO, json
     rec_dir = os.path.join(archive_dir, ts_dir)
     seq = 0
-    while True:  # 原子创建:race-free 处理同秒冲突
+    while True:  # 原子创建 + seq 上界(防理论无限循环)
         try:
             os.makedirs(rec_dir)
             break
         except FileExistsError:
             seq += 1
+            if seq > 999:
+                raise RuntimeError(f"archive: same-second dir collision limit hit under {archive_dir}")
             rec_dir = os.path.join(archive_dir, f"{ts_dir}_{seq}")
 
     record = {
@@ -48,18 +54,26 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
         "final": final_text,
         "enhanced": raw_text != final_text,
     }
+    audio_dst = os.path.join(rec_dir, "audio.wav")
+    audio_moved = False
     try:
-        shutil.move(wav_path, os.path.join(rec_dir, "audio.wav"))
-        with open(os.path.join(rec_dir, "raw.txt"), "w", encoding="utf-8") as f:
-            f.write(raw_text)
-        with open(os.path.join(rec_dir, "final.txt"), "w", encoding="utf-8") as f:
-            f.write(final_text)
+        # 1. 先写可重建的文本文件(各 flush+fsync)
+        for name, content in (("raw.txt", raw_text), ("final.txt", final_text)):
+            with open(os.path.join(rec_dir, name), "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+        # 2. move 珍贵的 wav(原 wav 消失,此后音频只在 rec_dir)
+        shutil.move(wav_path, audio_dst)
+        audio_moved = True
+        # 3. 最后记索引(flush+fsync);若此步失败,音频已在 rec_dir,保留
         with open(os.path.join(archive_dir, "index.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
     except Exception:
-        shutil.rmtree(rec_dir, ignore_errors=True)  # 失败回滚:不留孤儿目录
+        if not audio_moved:
+            shutil.rmtree(rec_dir, ignore_errors=True)  # wav 还在原位,rec_dir 只是文本半成品,安全删
+        # audio_moved=True:绝不删 rec_dir(音频在里面),索引可能缺是可接受的
         raise
-
     return rec_dir

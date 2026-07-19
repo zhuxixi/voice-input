@@ -48,11 +48,12 @@
 
 ### `archive_recording(wav_path, raw_text, final_text, archive_dir=ARCHIVE_DIR) -> str`
 
-- 生成时间戳目录名(`YYYY-MM-DD_HHMMSS`,fs-safe),ISO 时间戳写 JSON;**原子** `os.makedirs`(catch `FileExistsError` 递增 `_<seq>` 后缀,避免 TOCTOU)
+- 生成时间戳目录名(`YYYY-MM-DD_HHMMSS`,fs-safe),ISO 时间戳写 JSON;**原子** `os.makedirs`(catch `FileExistsError` 递增 `_<seq>` 后缀,避免 TOCTOU;seq 上界 999 防理论无限循环)
+- **顺序:建目录 → 写文本 → move wav → 记索引**(wav 珍贵不可逆,必须最后 move;索引在最后,move 前失败不会留下孤儿索引)
+- 写 `raw.txt`、`final.txt`(各 `flush` + `fsync` 保落盘)
 - **move** wav 到目录(而非复制,避免 /tmp 残留 + 省一次 IO)
-- 写 `raw.txt`、`final.txt`
 - 追加一行到 `index.jsonl`(append, `"a"`),`flush` + `fsync` 保落盘
-- **原子性**:move + 两个写 + index 写包进 try;失败 `shutil.rmtree(rec_dir)` 回滚后 re-raise(不留孤儿目录)
+- **回滚原则**:`audio_moved` 标志位决定回滚行为——wav move **之前**失败 → `shutil.rmtree(rec_dir)`(wav 还在原位,交给调用方 finally 兜底);wav move **之后**失败 → 保留 rec_dir(音频已在,索引可能缺,符合"丢索引不丢音频")
 - 返回归档目录路径(str);任何异常抛出(由调用方捕获)
 
 ### 模块拆分
@@ -118,7 +119,7 @@ finally:
 | recordings/ 不可建/不可写 | archive 抛异常 → 捕获 → stderr 警告 → 转写正常粘贴 |
 | 磁盘满 | 同上 |
 | wav move 失败 | 同上;finally 兜底 unlink |
-| index.jsonl 写失败 | 同上;但此时 wav 可能已 move(可接受,丢索引不丢音频) |
+| index.jsonl 写失败 | 同上;wav 已 move 进 rec_dir(新顺序下 index 是最后一步),rec_dir 保留(丢索引不丢音频) |
 
 核心原则:**归档是增强,任何归档问题不得阻断原本的转写+粘贴**。
 

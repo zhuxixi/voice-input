@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import unittest
 import wave
+from unittest import mock
 
 from archive import archive_recording
 
@@ -75,6 +76,32 @@ class TestArchive(unittest.TestCase):
     def test_unwritable_dir_raises(self):
         with self.assertRaises(Exception):
             archive_recording(self._wav(), "x", "x", archive_dir="/proc/cannot-create-xxx")
+
+    def test_audio_not_lost_if_index_write_fails_after_move(self):
+        wav = self._wav()
+        # 让 index.jsonl 的 open("a") 抛异常:raw.txt/final.txt("w") 正常 → move 成功 →
+        # 写 index 时失败 → audio_moved=True → except 不 rmtree → audio.wav 留在 rec_dir。
+        real_open = open
+
+        def flaky_open(path, mode="r", *a, **kw):
+            if mode == "a":
+                raise OSError("simulated index write failure")
+            return real_open(path, mode, *a, **kw)
+
+        with mock.patch("builtins.open", side_effect=flaky_open):
+            with self.assertRaises(OSError):
+                archive_recording(wav, "x", "x", archive_dir=self.archive_dir)
+        # 关键断言:wav 被 move 进了某个 rec_dir(音频没丢,没留在 /tmp 也没被删)
+        rec_dirs = (
+            [d for d in os.listdir(self.archive_dir) if not d.endswith(".jsonl")]
+            if os.path.isdir(self.archive_dir)
+            else []
+        )
+        found_audio = any(
+            os.path.isfile(os.path.join(self.archive_dir, d, "audio.wav")) for d in rec_dirs
+        )
+        self.assertTrue(found_audio, "audio.wav must survive index-write failure (no data loss)")
+        self.assertFalse(os.path.exists(wav), "original wav should have been moved out of /tmp")
 
 
 if __name__ == "__main__":
