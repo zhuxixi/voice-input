@@ -54,6 +54,10 @@ nohup ./voice-ptt.sh &
 
 启动后按住 **右 Command 键**（Mac 键盘）录音，松开自动转写并输入。
 
+### 录音归档
+
+默认每次录音的音频 + 转写结果会归档到 `~/.local/share/voice-input/recordings/`（每条一目录 + `index.jsonl` 索引），供回溯与评测。关闭：`VOICE_INPUT_ARCHIVE=0 ./voice-ptt.sh`。
+
 ### 开机自启
 
 ```bash
@@ -78,6 +82,7 @@ EOF
 |---|---|
 | `voice-ptt.sh` | 启动脚本（设置 CUDA 环境变量） |
 | `voice-ptt.py` | 主程序（按住录音模式，GTK 浮层提示） |
+| `archive.py` | 录音归档（音频 + 转写文本存到 `~/.local/share/voice-input/recordings/`） |
 | `voice-toggle.sh` | 切换模式脚本（按一下开始/停止） |
 | `test-mic.sh` | 麦克风测试 |
 | `download-model.sh` | 模型下载（hf-mirror.com，中国网络友好） |
