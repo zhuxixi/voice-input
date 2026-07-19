@@ -4,7 +4,7 @@
 
 **Goal:** 把每次语音录音 + Whisper 转写结果成对归档到 `~/.local/share/voice-input/recordings/`(每条录音一目录 `audio.wav` / `raw.txt` / `final.txt` + 一份 append-only `index.jsonl`),供回溯与未来 A/B 评测。
 
-**Architecture:** 新增纯函数模块 `archive.py`(仅依赖 Python 标准库,无 GTK/pynput,可独立单元测试);`voice-ptt.py` 在 `stop_recording()` 转写后接入,把 wav **move** 到归档目录(替代原 `os.unlink`),归档独立 `try` 不阻断转写+粘贴。
+**Architecture:** 新增纯函数模块 `archive.py`(仅依赖 Python 标准库,无 GTK/pynput,可独立单元测试);`voice-ptt.py` 在 `stop_recording()` 转写后接入,把 wav **copyfile+校验+删源** 到归档目录(替代原 `os.unlink`,显式 copyfile 保留源直至数据完整性确认),归档独立 `try` 不阻断转写+粘贴。
 
 **Tech Stack:** Python 3.12 标准库(`os` / `shutil` / `json` / `wave` / `datetime` / `unittest`),**零新依赖**。
 
@@ -167,15 +167,17 @@ ARCHIVE_ENABLED = os.environ.get("VOICE_INPUT_ARCHIVE", "1") != "0"
 
 
 def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir: str = ARCHIVE_DIR) -> str:
-    """归档一条录音。顺序:建目录→写文本→move wav→记索引。
+    """归档一条录音。顺序:建目录→写文本→copyfile wav + 校验 + 删源→记索引。
 
-    回滚原则(wav 珍贵不可逆):
-    - 基于 audio_dst 是否存在判断回滚(覆盖跨设备 move 部分成功的 edge case)
-    - audio_dst 不存在(含 wav move 之前的失败)→ rmtree(rec_dir)(wav 还在原位,交给调用方 finally)
-    - audio_dst 已存在(含 wav move 之后的失败、跨设备 copy 成功但 copystat/unlink 失败)→ 保留 rec_dir(音频已在,索引可能缺,符合"丢索引不丢音频")
+    回滚原则(wav 珍贵不可逆,基于 audio_confirmed 标志判断):
+    - audio_confirmed=False(audio 数据未完整落到 rec_dir / 大小校验未通过)
+      → rmtree(rec_dir)(清半成品,含截断 audio;源 wav 还在原位,交调用方 finally)
+    - audio_confirmed=True(copyfile 成功 + 大小校验通过,但后续 copystat/remove/index 失败)
+      → 保留 rec_dir(音频数据完整已在,索引可能缺,符合"丢索引不丢音频")
+    copystat(权限/时间等元数据)失败降级为非致命——不影响数据完整性。
 
     Args:
-        wav_path: 待归档的 wav 路径(会被 move 走)
+        wav_path: 待归档的 wav 路径(成功路径会被删源)
         raw_text: Whisper 原始转写
         final_text: 最终输出(当前 == raw;未来接纠错后可能不同)
         archive_dir: 归档根目录(测试时可传入临时目录)
@@ -210,6 +212,7 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
         "enhanced": raw_text != final_text,
     }
     audio_dst = os.path.join(rec_dir, "audio.wav")
+    audio_confirmed = False  # audio 数据已完整落到 rec_dir(并校验过)
     try:
         # 1. 先写可重建的文本文件(各 flush+fsync)
         for name, content in (("raw.txt", raw_text), ("final.txt", final_text)):
@@ -217,18 +220,31 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
                 f.write(content)
                 f.flush()
                 os.fsync(f.fileno())
-        # 2. move 珍贵的 wav(跨设备时 copy+unlink+copystat,可能部分成功)
-        shutil.move(wav_path, audio_dst)
-        # 3. 记索引(flush+fsync);若此步失败,音频已在 rec_dir,保留
+        # 2. copy audio 数据(保留源;copyfile 只 copy 数据,不 copy 元数据)
+        shutil.copyfile(wav_path, audio_dst)
+        with open(audio_dst, "rb") as f:
+            os.fsync(f.fileno())  # fsync audio(kimi#8)
+        # 3. 大小校验(防 copyfile 中途失败留截断,cc#9/kimi#9)
+        if os.path.getsize(audio_dst) != os.path.getsize(wav_path):
+            raise OSError("archive: wav copy incomplete (size mismatch)")
+        audio_confirmed = True  # audio 数据完整确认
+        # 4. 元数据(权限/时间),失败非致命——不影响数据完整性
+        try:
+            shutil.copystat(wav_path, audio_dst)
+        except OSError:
+            pass
+        # 5. audio 完整 → 删源(此时 rec_dir 已有完整 audio)
+        os.remove(wav_path)
+        # 6. 记索引(flush+fsync);若此步失败,audio_confirmed=True → 保留 rec_dir
         with open(os.path.join(archive_dir, "index.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
     except Exception:
-        # 只有音频还没落到 rec_dir 才 rmtree(此时 wav 仍在原位,交调用方 finally)
-        # 若 audio_dst 已存在(含跨设备 copy 成功但后续 copystat/unlink 失败):保留 rec_dir,绝不丢音频
-        if not os.path.exists(audio_dst):
+        if not audio_confirmed:
+            # audio 数据未确认完整 → 清半成品(截断 audio/raw/final);源 wav 还在,交调用方 finally
             shutil.rmtree(rec_dir, ignore_errors=True)
+        # audio_confirmed=True:audio 完整在 rec_dir,绝不删(源已删或还在都不影响音频安全)
         raise
     return rec_dir
 ```

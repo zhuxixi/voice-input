@@ -49,11 +49,11 @@
 ### `archive_recording(wav_path, raw_text, final_text, archive_dir=ARCHIVE_DIR) -> str`
 
 - 生成时间戳目录名(`YYYY-MM-DD_HHMMSS`,fs-safe),ISO 时间戳写 JSON;**原子** `os.makedirs`(catch `FileExistsError` 递增 `_<seq>` 后缀,避免 TOCTOU;seq 上界 999 防理论无限循环)
-- **顺序:建目录 → 写文本 → move wav → 记索引**(wav 珍贵不可逆,必须最后 move;索引在最后,move 前失败不会留下孤儿索引)
+- **顺序:建目录 → 写文本 → copyfile wav + fsync + 大小校验 + 删源 → 记索引**(wav 珍贵不可逆,数据 copy 完整确认后才删源;索引在最后,删源前失败不会留下孤儿索引)
 - 写 `raw.txt`、`final.txt`(各 `flush` + `fsync` 保落盘)
-- **move** wav 到目录(而非复制,避免 /tmp 残留 + 省一次 IO)
+- **copyfile** wav 到目录(显式 copyfile 代替 move,保留源直到数据完整性确认);copyfile 后 `fsync(audio_dst)` 保 audio 落盘;**大小校验**(`getsize(dst) == getsize(src)`)防中途失败(ENOSPC/IO)留截断;校验通过置 `audio_confirmed=True`;`copystat`(元数据:权限/时间)失败降级为非致命(不影响数据完整性);最后 `os.remove(wav_path)` 删源(此时 rec_dir 已有完整 audio)
 - 追加一行到 `index.jsonl`(append, `"a"`),`flush` + `fsync` 保落盘
-- **回滚原则**:基于 `audio_dst` 是否存在判断回滚(覆盖跨设备 move 部分成功的 edge case)——`audio_dst` 不存在(含 wav move **之前**失败)→ `shutil.rmtree(rec_dir)`(wav 还在原位,交给调用方 finally 兜底);`audio_dst` 已存在(含 wav move **之后**失败、跨设备 copy 成功但 copystat/unlink 失败)→ 保留 rec_dir(音频已在,索引可能缺,符合"丢索引不丢音频")
+- **回滚原则**:基于 `audio_confirmed` 标志判断回滚——`audio_confirmed=False`(copyfile 未成功 / 大小校验未通过)→ `shutil.rmtree(rec_dir)`(清半成品含截断 audio;源 wav 还在原位,交给调用方 finally 兜底);`audio_confirmed=True`(copyfile+校验通过,后续 copystat/remove/index 失败)→ 保留 rec_dir(音频数据完整已在,索引可能缺,符合"丢索引不丢音频")
 - 返回归档目录路径(str);任何异常抛出(由调用方捕获)
 
 ### 模块拆分
@@ -99,7 +99,7 @@ finally:
     # 归档(置于 finally 套件内,独立 try,失败不影响转写/粘贴)
     if ARCHIVE_ENABLED and text and os.path.exists(WAVFILE):
         try:
-            archive_recording(WAVFILE, text, text)   # move wav + 写 raw/final/jsonl
+            archive_recording(WAVFILE, text, text)   # copyfile+校验+删源 wav + 写 raw/final/jsonl
         except Exception as ae:
             print(f"[voice-input] archive failed: {ae}", file=sys.stderr)
     if os.path.exists(WAVFILE):   # 异常路径或归档失败 → wav 还在 → 清理
@@ -117,9 +117,11 @@ finally:
 | 故障 | 行为 |
 |---|---|
 | recordings/ 不可建/不可写 | archive 抛异常 → 捕获 → stderr 警告 → 转写正常粘贴 |
-| 磁盘满 | 同上 |
-| wav move 失败 | 同上;finally 兜底 unlink |
-| index.jsonl 写失败 | 同上;wav 已 move 进 rec_dir(新顺序下 index 是最后一步),rec_dir 保留(丢索引不丢音频) |
+| 磁盘满(写文本阶段) | 同上;wav 未 copy,源在 /tmp,finally 兜底 unlink |
+| 磁盘满(copyfile 中途失败留截断 audio) | 大小校验失败 → `audio_confirmed=False` → rmtree 清半成品 → 源 wav 保留 → finally 兜底 unlink |
+| copyfile 完整 + copystat 失败 | copystat 降级非致命(元数据丢,数据完整);继续删源 + 记索引 |
+| copyfile 完整 + remove(删源)失败 | `audio_confirmed=True` → 保留 rec_dir(源也在,无数据丢失)→ finally 不 unlink(已不在 /tmp) |
+| index.jsonl 写失败 | 同上(copyfile+删源已成功),rec_dir 保留(丢索引不丢音频) |
 
 核心原则:**归档是增强,任何归档问题不得阻断原本的转写+粘贴**。
 

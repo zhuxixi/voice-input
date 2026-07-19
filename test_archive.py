@@ -103,25 +103,34 @@ class TestArchive(unittest.TestCase):
         self.assertTrue(found_audio, "audio.wav must survive index-write failure (no data loss)")
         self.assertFalse(os.path.exists(wav), "original wav should have been moved out of /tmp")
 
-    def test_audio_survives_cross_device_move_partial_failure(self):
-        """cc#8: shutil.move 跨设备 copy 成功但 copystat/unlink 失败时,audio.wav 不能被 rmtree 删掉。"""
+    def test_audio_not_lost_on_copy_truncation(self):
+        """cc#9/kimi#9: copyfile 中途失败(ENOSPC)留截断 audio → 必须 rmtree 清掉,源 wav 保留。"""
         wav = self._wav()
-        def fake_move(src, dst):
-            # 模拟跨设备:copy 成功(写 dst)但 copystat 失败 → 抛
-            import shutil as _s
-            _s.copyfile(src, dst)  # audio 已落到 dst
-            raise OSError("simulated copystat failure (cross-device)")
-        with mock.patch("archive.shutil.move", side_effect=fake_move):
+        def truncating_copyfile(src, dst):
+            # 写一小部分(dst 截断)后抛,模拟 ENOSPC(源 ~244 bytes,这里只写 10)
+            with open(dst, "wb") as f:
+                f.write(b"\x00" * 10)  # 截断
+            raise OSError("simulated ENOSPC during copyfile")
+        with mock.patch("archive.shutil.copyfile", side_effect=truncating_copyfile):
             with self.assertRaises(OSError):
                 archive_recording(wav, "x", "x", archive_dir=self.archive_dir)
-        # audio.wav 应仍在 rec_dir(没被 rmtree 删)
-        rec_dirs = (
-            [d for d in os.listdir(self.archive_dir) if not d.endswith(".jsonl")]
-            if os.path.isdir(self.archive_dir)
-            else []
-        )
-        found = any(os.path.isfile(os.path.join(self.archive_dir, d, "audio.wav")) for d in rec_dirs)
-        self.assertTrue(found, "audio.wav must survive cross-device move partial failure (no data loss)")
+        # rec_dir 应被 rmtree 清掉(不留截断孤儿)
+        if os.path.isdir(self.archive_dir):
+            leftover = [d for d in os.listdir(self.archive_dir) if not d.endswith(".jsonl")]
+            self.assertEqual(leftover, [], "truncated rec_dir must be cleaned up")
+        # 源 wav 还在(没丢,交 finally)
+        self.assertTrue(os.path.exists(wav), "source wav must survive copy failure")
+
+    def test_audio_survives_copystat_failure_after_copy(self):
+        """cc#8: copyfile 成功但 copystat 失败 → audio 数据完整,必须保留(不 rmtree)。"""
+        wav = self._wav()
+        expected_size = os.path.getsize(wav)  # 完整大小(WAV header + frames)
+        with mock.patch("archive.shutil.copystat", side_effect=OSError("copystat failed")):
+            rec_dir = archive_recording(wav, "x", "x", archive_dir=self.archive_dir)
+        self.assertTrue(os.path.isfile(os.path.join(rec_dir, "audio.wav")))
+        # audio 数据完整(大小与源一致)
+        self.assertEqual(os.path.getsize(os.path.join(rec_dir, "audio.wav")), expected_size)
+        self.assertFalse(os.path.exists(wav))  # 源已删
 
 
 if __name__ == "__main__":
