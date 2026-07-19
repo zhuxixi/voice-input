@@ -168,15 +168,15 @@ ARCHIVE_ENABLED = os.environ.get("VOICE_INPUT_ARCHIVE", "1") != "0"
 
 
 def _fsync_dir(path: str) -> None:
-    """best-effort fsync 目录条目(防掉电后新建文件/子目录条目未落盘)。失败忽略。"""
+    """best-effort fsync 目录条目(防掉电后新建文件/子目录条目未落盘)。失败记 stderr 但不致命。"""
     try:
         fd = os.open(path, os.O_RDONLY)
         try:
             os.fsync(fd)
         finally:
             os.close(fd)
-    except OSError:
-        pass
+    except OSError as fe:
+        print(f"[archive] _fsync_dir({path}) failed (non-fatal): {fe}", file=sys.stderr)
 
 
 def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir: str = ARCHIVE_DIR) -> str:
@@ -255,6 +255,7 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
+        _fsync_dir(archive_dir)  # 让 index.jsonl 目录条目持久(首次创建时关键,cc#11/kimi#9)
     except Exception:
         if not audio_confirmed:
             # audio 数据未确认完整 → 清半成品(截断 audio/raw/final);源 wav 还在,交调用方 finally
