@@ -103,6 +103,26 @@ class TestArchive(unittest.TestCase):
         self.assertTrue(found_audio, "audio.wav must survive index-write failure (no data loss)")
         self.assertFalse(os.path.exists(wav), "original wav should have been moved out of /tmp")
 
+    def test_audio_survives_cross_device_move_partial_failure(self):
+        """cc#8: shutil.move 跨设备 copy 成功但 copystat/unlink 失败时,audio.wav 不能被 rmtree 删掉。"""
+        wav = self._wav()
+        def fake_move(src, dst):
+            # 模拟跨设备:copy 成功(写 dst)但 copystat 失败 → 抛
+            import shutil as _s
+            _s.copyfile(src, dst)  # audio 已落到 dst
+            raise OSError("simulated copystat failure (cross-device)")
+        with mock.patch("archive.shutil.move", side_effect=fake_move):
+            with self.assertRaises(OSError):
+                archive_recording(wav, "x", "x", archive_dir=self.archive_dir)
+        # audio.wav 应仍在 rec_dir(没被 rmtree 删)
+        rec_dirs = (
+            [d for d in os.listdir(self.archive_dir) if not d.endswith(".jsonl")]
+            if os.path.isdir(self.archive_dir)
+            else []
+        )
+        found = any(os.path.isfile(os.path.join(self.archive_dir, d, "audio.wav")) for d in rec_dirs)
+        self.assertTrue(found, "audio.wav must survive cross-device move partial failure (no data loss)")
+
 
 if __name__ == "__main__":
     unittest.main()

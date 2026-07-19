@@ -53,7 +53,7 @@
 - 写 `raw.txt`、`final.txt`(各 `flush` + `fsync` 保落盘)
 - **move** wav 到目录(而非复制,避免 /tmp 残留 + 省一次 IO)
 - 追加一行到 `index.jsonl`(append, `"a"`),`flush` + `fsync` 保落盘
-- **回滚原则**:`audio_moved` 标志位决定回滚行为——wav move **之前**失败 → `shutil.rmtree(rec_dir)`(wav 还在原位,交给调用方 finally 兜底);wav move **之后**失败 → 保留 rec_dir(音频已在,索引可能缺,符合"丢索引不丢音频")
+- **回滚原则**:基于 `audio_dst` 是否存在判断回滚(覆盖跨设备 move 部分成功的 edge case)——`audio_dst` 不存在(含 wav move **之前**失败)→ `shutil.rmtree(rec_dir)`(wav 还在原位,交给调用方 finally 兜底);`audio_dst` 已存在(含 wav move **之后**失败、跨设备 copy 成功但 copystat/unlink 失败)→ 保留 rec_dir(音频已在,索引可能缺,符合"丢索引不丢音频")
 - 返回归档目录路径(str);任何异常抛出(由调用方捕获)
 
 ### 模块拆分
