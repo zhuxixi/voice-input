@@ -31,18 +31,14 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
     ts_dir = now.strftime("%Y-%m-%d_%H%M%S")   # fs-safe, 用于目录名
     ts_iso = now.strftime("%Y-%m-%dT%H:%M:%S")  # ISO, 用于 json
     rec_dir = os.path.join(archive_dir, ts_dir)
-    seq = 1
-    while os.path.exists(rec_dir):  # 同秒冲突:加序号后缀
-        rec_dir = os.path.join(archive_dir, f"{ts_dir}_{seq}")
-        seq += 1
-    os.makedirs(rec_dir, exist_ok=True)
-
-    shutil.move(wav_path, os.path.join(rec_dir, "audio.wav"))
-
-    with open(os.path.join(rec_dir, "raw.txt"), "w", encoding="utf-8") as f:
-        f.write(raw_text)
-    with open(os.path.join(rec_dir, "final.txt"), "w", encoding="utf-8") as f:
-        f.write(final_text)
+    seq = 0
+    while True:  # 原子创建:race-free 处理同秒冲突
+        try:
+            os.makedirs(rec_dir)
+            break
+        except FileExistsError:
+            seq += 1
+            rec_dir = os.path.join(archive_dir, f"{ts_dir}_{seq}")
 
     record = {
         "ts": ts_iso,
@@ -52,7 +48,18 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
         "final": final_text,
         "enhanced": raw_text != final_text,
     }
-    with open(os.path.join(archive_dir, "index.jsonl"), "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    try:
+        shutil.move(wav_path, os.path.join(rec_dir, "audio.wav"))
+        with open(os.path.join(rec_dir, "raw.txt"), "w", encoding="utf-8") as f:
+            f.write(raw_text)
+        with open(os.path.join(rec_dir, "final.txt"), "w", encoding="utf-8") as f:
+            f.write(final_text)
+        with open(os.path.join(archive_dir, "index.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception:
+        shutil.rmtree(rec_dir, ignore_errors=True)  # 失败回滚:不留孤儿目录
+        raise
 
     return rec_dir

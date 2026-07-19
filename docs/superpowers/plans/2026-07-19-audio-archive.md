@@ -166,7 +166,7 @@ ARCHIVE_DIR = os.path.expanduser("~/.local/share/voice-input/recordings")
 ARCHIVE_ENABLED = os.environ.get("VOICE_INPUT_ARCHIVE", "1") != "0"
 
 
-def archive_recording(wav_path, raw_text, final_text, archive_dir=ARCHIVE_DIR):
+def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir: str = ARCHIVE_DIR) -> str:
     """归档一条录音:建时间戳目录,move wav,写 raw/final,追加 index.jsonl。
 
     Args:
@@ -181,31 +181,40 @@ def archive_recording(wav_path, raw_text, final_text, archive_dir=ARCHIVE_DIR):
     Raises:
         任何 IO 异常向上抛,由调用方捕获(不影响转写主流程)。
     """
-    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    rec_dir = os.path.join(archive_dir, ts)
-    seq = 1
-    while os.path.exists(rec_dir):  # 同秒冲突:加序号后缀
-        rec_dir = os.path.join(archive_dir, f"{ts}_{seq}")
-        seq += 1
-    os.makedirs(rec_dir, exist_ok=True)
-
-    shutil.move(wav_path, os.path.join(rec_dir, "audio.wav"))
-
-    with open(os.path.join(rec_dir, "raw.txt"), "w", encoding="utf-8") as f:
-        f.write(raw_text)
-    with open(os.path.join(rec_dir, "final.txt"), "w", encoding="utf-8") as f:
-        f.write(final_text)
+    now = datetime.now()
+    ts_dir = now.strftime("%Y-%m-%d_%H%M%S")   # fs-safe, 用于目录名
+    ts_iso = now.strftime("%Y-%m-%dT%H:%M:%S")  # ISO, 用于 json
+    rec_dir = os.path.join(archive_dir, ts_dir)
+    seq = 0
+    while True:  # 原子创建:race-free 处理同秒冲突
+        try:
+            os.makedirs(rec_dir)
+            break
+        except FileExistsError:
+            seq += 1
+            rec_dir = os.path.join(archive_dir, f"{ts_dir}_{seq}")
 
     record = {
-        "ts": ts,
+        "ts": ts_iso,
         "dir": os.path.basename(rec_dir),
         "audio": "audio.wav",
         "raw": raw_text,
         "final": final_text,
         "enhanced": raw_text != final_text,
     }
-    with open(os.path.join(archive_dir, "index.jsonl"), "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    try:
+        shutil.move(wav_path, os.path.join(rec_dir, "audio.wav"))
+        with open(os.path.join(rec_dir, "raw.txt"), "w", encoding="utf-8") as f:
+            f.write(raw_text)
+        with open(os.path.join(rec_dir, "final.txt"), "w", encoding="utf-8") as f:
+            f.write(final_text)
+        with open(os.path.join(archive_dir, "index.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception:
+        shutil.rmtree(rec_dir, ignore_errors=True)
+        raise
 
     return rec_dir
 ```
@@ -276,6 +285,7 @@ Modify `voice-ptt.py` 的 `stop_recording()`(原第 125-134 行):
 
 改后:
 ```python
+    text = ""  # 预置:transcribe 抛 BaseException(KeyboardInterrupt)时 finally 不 NameError
     try:
         m = load_model()
         segments, info = m.transcribe(WAVFILE, language="zh")
@@ -283,19 +293,18 @@ Modify `voice-ptt.py` 的 `stop_recording()`(原第 125-134 行):
     except Exception as e:
         print(f"[voice-input] Error: {e}", file=sys.stderr)
         text = ""
-
-    # 归档(独立 try,失败不影响转写/粘贴)
-    if ARCHIVE_ENABLED and text and os.path.exists(WAVFILE):
-        try:
-            archive_recording(WAVFILE, text, text)
-        except Exception as ae:
-            print(f"[voice-input] archive failed: {ae}", file=sys.stderr)
     finally:
+        # 归档(置于 finally 套件内,独立 try,失败不影响转写/粘贴)
+        if ARCHIVE_ENABLED and text and os.path.exists(WAVFILE):
+            try:
+                archive_recording(WAVFILE, text, text)
+            except Exception as ae:
+                print(f"[voice-input] archive failed: {ae}", file=sys.stderr)
         if os.path.exists(WAVFILE):  # 异常/归档失败 → wav 还在 → 清理
             os.unlink(WAVFILE)
 ```
 
-关键:正常路径 `archive_recording` 把 wav move 走 → `os.path.exists(WAVFILE)` 为 False → finally 跳过 unlink;归档失败或 transcribe 异常时 wav 还在 → finally unlink(/tmp 不残留)。
+关键:`text = ""` 预置防 BaseException 路径 NameError;归档 `if/try` 整体置于 `finally` 套件内,其后才是 `unlink` 兜底。正常路径 `archive_recording` 把 wav move 走 → `os.path.exists(WAVFILE)` 为 False → 跳过 unlink;归档失败或 transcribe 异常时 wav 还在 → unlink(/tmp 不残留)。
 
 - [ ] **Step 3: 语法校验**
 

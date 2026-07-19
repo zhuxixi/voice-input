@@ -44,16 +44,20 @@
 
 > `config_snapshot` 暂不存——现在没有可配置的增强;A&B 落地后再加,避免空字段。
 
-## 4. 组件设计(voice-ptt.py 内新增)
+## 4. 组件设计(archive.py 纯函数模块 + voice-ptt.py 接入)
 
-### `archive_recording(wav_path, raw_text, final_text) -> bool`
+### `archive_recording(wav_path, raw_text, final_text, archive_dir=ARCHIVE_DIR) -> str`
 
-- 生成时间戳目录名(`YYYY-MM-DD_HHMMSS`),建目录
+- 生成时间戳目录名(`YYYY-MM-DD_HHMMSS`,fs-safe),ISO 时间戳写 JSON;**原子** `os.makedirs`(catch `FileExistsError` 递增 `_<seq>` 后缀,避免 TOCTOU)
 - **move** wav 到目录(而非复制,避免 /tmp 残留 + 省一次 IO)
 - 写 `raw.txt`、`final.txt`
-- 追加一行到 `index.jsonl`(append, `"a"`)
-- 成功返回 True;任何异常抛出(由调用方捕获)
-- 幂等性: 目录名用时间戳,同秒冲突概率极低;若发生,加 `_<seq>` 后缀
+- 追加一行到 `index.jsonl`(append, `"a"`),`flush` + `fsync` 保落盘
+- **原子性**:move + 两个写 + index 写包进 try;失败 `shutil.rmtree(rec_dir)` 回滚后 re-raise(不留孤儿目录)
+- 返回归档目录路径(str);任何异常抛出(由调用方捕获)
+
+### 模块拆分
+
+`archive.py` 是**纯函数模块**(仅依赖标准库 `os`/`shutil`/`json`/`datetime`),无 GTK/pynput 副作用,可独立单元测试。`voice-ptt.py` 仅 `from archive import archive_recording, ARCHIVE_ENABLED` 接入。这样拆是因为 `voice-ptt.py` 顶部即 `import gi` / `from pynput import keyboard`,直接 import 会触发 GTK 初始化,测试环境(无 display)无法加载。
 
 ### 开关
 
@@ -82,6 +86,7 @@ finally:
 
 改造后:
 ```python
+text = ""  # 预置:transcribe 抛 BaseException(KeyboardInterrupt)时 finally 不 NameError
 try:
     m = load_model()
     segments, info = m.transcribe(WAVFILE, language="zh")
@@ -89,21 +94,21 @@ try:
 except Exception as e:
     print(f"[voice-input] Error: {e}", file=sys.stderr)
     text = ""
-
-# 归档(独立 try,失败不影响转写/粘贴)
-if ARCHIVE_ENABLED and text and os.path.exists(WAVFILE):
-    try:
-        archive_recording(WAVFILE, text, text)   # move wav + 写 raw/final/jsonl
-    except Exception as ae:
-        print(f"[voice-input] archive failed: {ae}", file=sys.stderr)
 finally:
+    # 归档(置于 finally 套件内,独立 try,失败不影响转写/粘贴)
+    if ARCHIVE_ENABLED and text and os.path.exists(WAVFILE):
+        try:
+            archive_recording(WAVFILE, text, text)   # move wav + 写 raw/final/jsonl
+        except Exception as ae:
+            print(f"[voice-input] archive failed: {ae}", file=sys.stderr)
     if os.path.exists(WAVFILE):   # 异常路径或归档失败 → wav 还在 → 清理
         os.unlink(WAVFILE)
 ```
 
 关键点:
-- 正常路径:`archive_recording` 把 wav **move** 走 → `WAVFILE` 不存在 → finally 跳过 unlink
-- 异常路径(transcribe 失败或归档失败):wav 还在 → finally unlink(保持原"用完即清"语义,/tmp 不残留)
+- `text = ""` 预置:`transcribe` 若抛 `BaseException`(如 `KeyboardInterrupt`,不被 `except Exception` 捕获)时 `text` 已定义,finally 中 `if ... and text ...` 走 falsy 分支跳过归档,直接兜底 `unlink`,不 NameError
+- 正常路径:`archive_recording` 把 wav **move** 走 → `WAVFILE` 不存在 → 跳过 unlink
+- 异常路径(transcribe 失败或归档失败):wav 还在 → unlink(保持原"用完即清"语义,/tmp 不残留)
 - 归档失败**绝不阻断**转写结果粘贴(独立 try + text 已就绪)
 
 ## 6. 错误处理与降级
@@ -137,7 +142,8 @@ finally:
 
 | 文件 | 动作 |
 |---|---|
-| `voice-ptt.py` | 改:加 `archive_recording` + 2 个常量 + stop_recording 接入点(净增 ~35 行) |
+| `archive.py` | 新建:纯函数归档模块(`archive_recording` + `ARCHIVE_DIR` / `ARCHIVE_ENABLED` 常量,标准库依赖,可独立单元测试) |
+| `voice-ptt.py` | 改:接入归档(`from archive import archive_recording, ARCHIVE_ENABLED` + `stop_recording()` 调用) |
 | `test_archive.py` | 新建:单元测试 |
 
 ## 9. 与 roadmap / A&B 的关系

@@ -123,6 +123,7 @@ def stop_recording():
     if not os.path.exists(WAVFILE) or os.path.getsize(WAVFILE) < 1000:
         return
 
+    text = ""  # 预置:转写若抛 BaseException(如 KeyboardInterrupt)不致 finally NameError
     try:
         m = load_model()
         segments, info = m.transcribe(WAVFILE, language="zh")
