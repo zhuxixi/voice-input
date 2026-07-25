@@ -27,3 +27,16 @@ def load_terms(path: str = DEFAULT_TERMS_PATH) -> dict:
     except (json.JSONDecodeError, OSError) as e:
         print(f"[voice-input] terms.json parse failed: {e}", file=sys.stderr)
         return {"terms": [], "hotwords": None}
+
+
+def build_prompt(terms: list) -> "str | None":
+    """把 terms 嵌入一句自然中文,作为 Whisper initial_prompt(解码上文)。
+
+    空 terms -> None(transcribe 不传 prompt,等价现状)。截断到前 30 词控 token
+    (Whisper initial_prompt 上限 224 token)。措辞(中文句包装 vs 纯词列表)是
+    实测调优点,合并后用户可按效果调整。
+    """
+    if not terms:
+        return None
+    sample = terms[:30]
+    return "以下是本次内容可能涉及的术语:" + "、".join(sample) + "。"

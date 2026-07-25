@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from terms import DEFAULT_TERMS_PATH, load_terms
+from terms import DEFAULT_TERMS_PATH, load_terms, build_prompt
 
 
 class TestLoadTerms(unittest.TestCase):
@@ -39,6 +39,23 @@ class TestLoadTerms(unittest.TestCase):
             DEFAULT_TERMS_PATH,
             os.path.expanduser("~/.config/voice-input/terms.json"),
         )
+
+
+class TestBuildPrompt(unittest.TestCase):
+    def test_empty_terms_returns_none(self):
+        self.assertIsNone(build_prompt([]))
+
+    def test_normal_terms_embeds_in_chinese_sentence(self):
+        prompt = build_prompt(["zima", "jfox"])
+        self.assertIn("zima", prompt)
+        self.assertIn("jfox", prompt)
+        self.assertIn("术语", prompt)  # 中文包装句
+
+    def test_truncates_to_30_terms(self):
+        many = [f"term{i}" for i in range(100)]
+        prompt = build_prompt(many)
+        self.assertIn("term29", prompt)
+        self.assertNotIn("term30", prompt)
 
 
 if __name__ == "__main__":
