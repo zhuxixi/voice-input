@@ -36,6 +36,7 @@ rec_proc = None
 active_window = None
 overlay_window = None
 _paused_players = []  # 录音开始时被暂停的 MPRIS 播放器 bus name,stop 时 resume
+_paused_lock = threading.Lock()  # 保护 _paused_players 跨 start/stop 线程读写(cc#1)
 
 def _make_css(color_hex):
     css = f"label {{ color: {color_hex}; font: bold 13px Sans; }}"
@@ -103,10 +104,14 @@ def start_recording():
         os.unlink(WAVFILE)
     if PAUSE_MEDIA_ENABLED:
         try:
-            _paused_players = pause_playing()
+            paused = pause_playing()  # D-Bus 在锁外执行,不阻塞其它线程
         except Exception as pe:
             print(f"[voice-input] pause_media failed: {pe}", file=sys.stderr)
-            _paused_players = []
+            paused = []
+        with _paused_lock:
+            # preserve: 新录音继承上一周期尚未 resume 的暂停责任。快速重录时
+            # pause_playing 返回 [](媒体已被我们暂停),不清空旧值,留给 stop resume
+            _paused_players = _paused_players + paused
     rec_proc = subprocess.Popen(
         # 走 PipeWire "default" 后端(默认 source=PD200X),由 PW 重采样共享,
         # 避免与 GNOME 等电平表监听抢占 ALSA 硬件节点(hw:3)导致 EBUSY 静默失败
@@ -123,19 +128,36 @@ def stop_recording():
         return
     recording = False
     if rec_proc:
-        rec_proc.terminate()
-        rec_proc.wait(timeout=2)
+        # terminate/wait 包 try/except:arecord 卡死/设备占用抛 TimeoutExpired 不得
+        # 跳过后续 resume + 转写(cc#2)。超时则 kill 兜底,仍失败也继续往下。
+        try:
+            rec_proc.terminate()
+            rec_proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                rec_proc.kill()
+                rec_proc.wait(timeout=1)
+            except Exception as ke:
+                print(f"[voice-input] arecord kill failed: {ke}", file=sys.stderr)
+        except Exception as e:
+            print(f"[voice-input] arecord stop failed: {e}", file=sys.stderr)
         rec_proc = None
 
-    if PAUSE_MEDIA_ENABLED and _paused_players:
-        # 先快照再清空,然后才 resume:避免 resume 的 D-Bus 往返期间 start_recording
-        # 把 _paused_players 赋成新值后,被这里误清导致下次松手跳过 resume(CR 反馈)
-        to_resume = _paused_players
-        _paused_players = []
-        try:
-            resume(to_resume)
-        except Exception as re:
-            print(f"[voice-input] resume_media failed: {re}", file=sys.stderr)
+    if PAUSE_MEDIA_ENABLED:
+        # 锁内原子快照+决策:若新录音已开始(recording=True),媒体应保持暂停,
+        # 恢复责任交给新周期(其 start 已 preserve);否则清空并 resume。
+        # resume 的 D-Bus 在锁外执行避免阻塞(cc#1 跨周期竞态的完整修复)。
+        with _paused_lock:
+            to_resume = _paused_players
+            if recording:
+                to_resume = []
+            else:
+                _paused_players = []
+        if to_resume:
+            try:
+                resume(to_resume)
+            except Exception as re:
+                print(f"[voice-input] resume_media failed: {re}", file=sys.stderr)
 
     GLib.idle_add(hide_overlay)
     time.sleep(0.3)

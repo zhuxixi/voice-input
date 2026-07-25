@@ -20,6 +20,10 @@ DBUS_NAME = "org.freedesktop.DBus"
 DBUS_PATH = "/org/freedesktop/DBus"
 DBUS_IFACE = "org.freedesktop.DBus"
 
+# 单次 D-Bus call_sync 超时(ms)。默认 -1≈25s,某播放器无响应会阻塞按键回调/
+# GTK 主循环。显式 2s 让故障快速失败回归降级路径(CR: cc#3/kimi#2)。
+_DBUS_TIMEOUT_MSEC = 2000
+
 
 def _select_to_pause(statuses):
     """纯函数:给定 {bus_name: PlaybackStatus},返回状态为 "Playing" 的 bus name 列表。
@@ -34,7 +38,7 @@ def _select_to_pause(statuses):
 
 
 def _session_bus():
-    """获取 session bus 连接。失败抛 GLib.Error(由调用方捕获)。"""
+    """获取 session bus 连接。失败抛异常(由调用方捕获)。"""
     return Gio.bus_get_sync(Gio.BusType.SESSION, None)
 
 
@@ -43,7 +47,7 @@ def _list_mpris_players(bus):
     res = bus.call_sync(
         DBUS_NAME, DBUS_PATH, DBUS_IFACE, "ListNames",
         None, GLib.VariantType.new("(as)"),
-        Gio.DBusCallFlags.NONE, -1, None,
+        Gio.DBusCallFlags.NONE, _DBUS_TIMEOUT_MSEC, None,
     )
     return [n for n in res.unpack()[0] if n.startswith(MPRIS_PREFIX)]
 
@@ -55,33 +59,33 @@ def _playback_status(bus, name):
             name, PLAYER_PATH, PROPS_IFACE, "Get",
             GLib.Variant("(ss)", (PLAYER_IFACE, "PlaybackStatus")),
             GLib.VariantType.new("(v)"),
-            Gio.DBusCallFlags.NONE, -1, None,
+            Gio.DBusCallFlags.NONE, _DBUS_TIMEOUT_MSEC, None,
         )
         return res.unpack()[0]
-    except GLib.Error as e:
+    except Exception as e:  # GLib.Error / 解包异常均吞,契合"对故障不抛"契约(cc#4)
         print(f"[media_pause] read status {name} failed: {e}", file=sys.stderr)
         return None
 
 
 def _call_player_method(bus, name, method):
-    """调 Player 的无参方法(Pause/Play)。失败抛 GLib.Error(由调用方捕获)。"""
+    """调 Player 的无参方法(Pause/Play)。失败抛异常(由调用方捕获)。"""
     bus.call_sync(
         name, PLAYER_PATH, PLAYER_IFACE, method,
         None, None,
-        Gio.DBusCallFlags.NONE, -1, None,
+        Gio.DBusCallFlags.NONE, _DBUS_TIMEOUT_MSEC, None,
     )
 
 
 def pause_playing():
     """暂停所有当前 "Playing" 的 MPRIS 播放器,返回被暂停的 bus name 列表。
 
-    对 D-Bus 故障不抛(枚举失败返回 []);单播放器 Pause 失败跳过 + 记 stderr。
+    对故障不抛(枚举失败返回 []);单播放器 Pause 失败跳过 + 记 stderr。
     调用方(voice-ptt)拿到返回值后,在 stop 时 resume 这些名字。
     """
     try:
         bus = _session_bus()
         names = _list_mpris_players(bus)
-    except GLib.Error as e:
+    except Exception as e:
         print(f"[media_pause] enumerate failed: {e}", file=sys.stderr)
         return []
     statuses = {}
@@ -94,7 +98,7 @@ def pause_playing():
         try:
             _call_player_method(bus, name, "Pause")
             paused.append(name)
-        except GLib.Error as e:
+        except Exception as e:
             print(f"[media_pause] Pause {name} failed: {e}", file=sys.stderr)
     return paused
 
@@ -105,11 +109,11 @@ def resume(names):
         return
     try:
         bus = _session_bus()
-    except GLib.Error as e:
+    except Exception as e:
         print(f"[media_pause] resume bus failed: {e}", file=sys.stderr)
         return
     for name in names:
         try:
             _call_player_method(bus, name, "Play")
-        except GLib.Error as e:
+        except Exception as e:
             print(f"[media_pause] resume {name} failed: {e}", file=sys.stderr)

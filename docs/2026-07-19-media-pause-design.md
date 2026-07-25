@@ -31,7 +31,7 @@
 **为何枚举所有 `org.mpris.MediaPlayer2.*` 而非写死 `chromium.*`**:用户只用 Chrome,实际只匹配到 Chrome;但通用枚举更稳——换播放器也自动覆盖,且零额外成本。
 
 **实现层**:Python 原生 `gi.repository.Gio` + `GLib`(项目已 `import gi`,复用,零新依赖,无 subprocess):
-- 列名:`Gio.DBus.get(SESSION).list_names()` 过滤 `org.mpris.MediaPlayer2.*`
+- 列名:`Gio.bus_get_sync(Gio.BusType.SESSION, None)` 拿连接,再 `call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames", ...)` 过滤 `org.mpris.MediaPlayer2.*`
 - 读状态:`call_sync(... "org.freedesktop.DBus.Properties" "Get" ("org.mpris.MediaPlayer2.Player","PlaybackStatus"))`
 - Pause/Play:`call_sync(... "org.mpris.MediaPlayer2.Player" "Pause"/"Play")`
 
@@ -52,8 +52,8 @@ PAUSE_MEDIA_ENABLED = os.environ.get("VOICE_INPUT_PAUSE_MEDIA", "1") != "0"
 
 ### `pause_playing() -> list[str]`(有副作用:调 Gio)
 
-1. `bus = Gio.DBus.get(Gio.BusType.SESSION)`
-2. 枚举 `list_names()` 过滤出 MPRIS 播放器名
+1. `bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)`
+2. 枚举(`call_sync ListNames`)过滤出 MPRIS 播放器名
 3. 逐个读 `PlaybackStatus`,组成 `statuses` dict
 4. `to_pause = _select_to_pause(statuses)`
 5. 对 `to_pause` 中**每个**名字调 `Player.Pause`;**逐个 try/except**(单个失败不中断其余,已成功暂停的仍记下);返回实际成功暂停的名字列表
