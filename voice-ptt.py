@@ -110,8 +110,9 @@ def start_recording():
             paused = []
         with _paused_lock:
             # preserve: 新录音继承上一周期尚未 resume 的暂停责任。快速重录时
-            # pause_playing 返回 [](媒体已被我们暂停),不清空旧值,留给 stop resume
-            _paused_players = _paused_players + paused
+            # pause_playing 返回 [](媒体已被我们暂停),不清空旧值,留给 stop resume。
+            # 去重:外部恢复后又重新暂停的同一播放器不重复累加,免 resume 重复 Play(cc#9)。
+            _paused_players = list(dict.fromkeys(_paused_players + paused))
     rec_proc = subprocess.Popen(
         ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-D", "hw:3", WAVFILE],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -125,26 +126,32 @@ def stop_recording():
     if not recording:
         return
     recording = False
-    if rec_proc:
+    # 局部快照 rec_proc:terminate 目标用局部 rec,避免 clobber 快速重录时 press2
+    # 写入的新 arecord(cc#7)。不置 rec_proc=None(同因);全局由下次 start 覆盖。
+    rec = rec_proc
+    if rec is not None:
         # terminate/wait 包 try/except:arecord 卡死/设备占用抛 TimeoutExpired 不得
         # 跳过后续 resume + 转写(cc#2)。超时则 kill 兜底,仍失败也继续往下。
         try:
-            rec_proc.terminate()
-            rec_proc.wait(timeout=2)
+            rec.terminate()
+            rec.wait(timeout=2)
         except subprocess.TimeoutExpired:
             try:
-                rec_proc.kill()
-                rec_proc.wait(timeout=1)
+                rec.kill()
+                rec.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                # kill 已发但进程仍未退出(可能残留占用音频)——区别于 kill 本身失败(cc#8)
+                print(f"[voice-input] arecord kill 后仍未退出(可能残留占用音频设备)", file=sys.stderr)
             except Exception as ke:
                 print(f"[voice-input] arecord kill failed: {ke}", file=sys.stderr)
         except Exception as e:
             print(f"[voice-input] arecord stop failed: {e}", file=sys.stderr)
-        rec_proc = None
 
     if PAUSE_MEDIA_ENABLED:
-        # 锁内原子快照+决策:若新录音已开始(recording=True),媒体应保持暂停,
-        # 恢复责任交给新周期(其 start 已 preserve);否则清空并 resume。
-        # resume 的 D-Bus 在锁外执行避免阻塞(cc#1 跨周期竞态的完整修复)。
+        # _paused_lock 保护 _paused_players 列表的快照+清空原子性(cc#1)。recording
+        # 是 GIL 下原子布尔,锁内读是 best-effort 快照:新录音已开始则不 resume、把
+        # 恢复责任交给新周期(其 start 已 preserve)。resume 的 D-Bus 在锁外执行避免
+        # 阻塞;D-Bus 操作排序的残留窗口见 media_pause 文档(kimi#7 接受)。
         with _paused_lock:
             to_resume = _paused_players
             if recording:

@@ -1,14 +1,13 @@
 """录音时自动暂停/恢复 MPRIS 媒体(用户的 Chrome 音乐/视频)。
 
-纯逻辑(本文件的 _select_to_pause)仅依赖标准库,可独立单元测试;
-Gio D-Bus 薄封装 pause_playing/resume 依赖 gi(系统 python3 自带,venv 无),
-import 本模块本身不连 D-Bus(连接只在函数内发生),无副作用。
+纯逻辑(_select_to_pause)仅依赖标准库,可独立单元测;Gio D-Bus 薄封装
+pause_playing/resume 惰性依赖 gi(首次调用才 import),故本模块在无 gi 的
+环境(如 venv)也能 import + 测 _select_to_pause(kimi#4/#5)。运行时
+voice-ptt 已先 import gi,首次调用无额外开销。本模块 import 不连 D-Bus。
 """
 
 import os
 import sys
-
-from gi.repository import Gio, GLib
 
 PAUSE_MEDIA_ENABLED = os.environ.get("VOICE_INPUT_PAUSE_MEDIA", "1") != "0"
 
@@ -20,9 +19,23 @@ DBUS_NAME = "org.freedesktop.DBus"
 DBUS_PATH = "/org/freedesktop/DBus"
 DBUS_IFACE = "org.freedesktop.DBus"
 
-# 单次 D-Bus call_sync 超时(ms)。默认 -1≈25s,某播放器无响应会阻塞按键回调/
-# GTK 主循环。显式 2s 让故障快速失败回归降级路径(CR: cc#3/kimi#2)。
+# 单次 D-Bus call_sync 超时(ms)。默认 -1≈25s,某播放器无响应会阻塞按键回调。
+# 显式 2s 让单次故障快速失败。注意:pause_playing 串行 (1+2N) 次调用,累积最坏
+# (1+2N)×2s;典型 Chrome 响应 ms 级,仅播放器 hung 时才逼近上界(cc#11 残留)。
 _DBUS_TIMEOUT_MSEC = 2000
+
+# 惰性导入:Gio/GLib 首次使用时才 import(见 _ensure_gi)。
+Gio = None
+GLib = None
+
+
+def _ensure_gi():
+    """首次调用时惰性导入 gi。让本模块在无 gi 环境(venv)也能 import + 单测
+    _select_to_pause;运行时 voice-ptt 已先 import gi,无额外开销。"""
+    global Gio, GLib
+    if Gio is None:
+        from gi.repository import Gio as _Gio, GLib as _GLib
+        Gio, GLib = _Gio, _GLib
 
 
 def _select_to_pause(statuses):
@@ -39,11 +52,13 @@ def _select_to_pause(statuses):
 
 def _session_bus():
     """获取 session bus 连接。失败抛异常(由调用方捕获)。"""
+    _ensure_gi()
     return Gio.bus_get_sync(Gio.BusType.SESSION, None)
 
 
 def _list_mpris_players(bus):
     """枚举 session bus 上所有 org.mpris.MediaPlayer2.* 播放器 bus name。"""
+    _ensure_gi()
     res = bus.call_sync(
         DBUS_NAME, DBUS_PATH, DBUS_IFACE, "ListNames",
         None, GLib.VariantType.new("(as)"),
@@ -54,6 +69,7 @@ def _list_mpris_players(bus):
 
 def _playback_status(bus, name):
     """读某播放器的 PlaybackStatus。成功返回 str,失败返回 None(跳过该播放器)。"""
+    _ensure_gi()
     try:
         res = bus.call_sync(
             name, PLAYER_PATH, PROPS_IFACE, "Get",
@@ -69,6 +85,7 @@ def _playback_status(bus, name):
 
 def _call_player_method(bus, name, method):
     """调 Player 的无参方法(Pause/Play)。失败抛异常(由调用方捕获)。"""
+    _ensure_gi()
     bus.call_sync(
         name, PLAYER_PATH, PLAYER_IFACE, method,
         None, None,
@@ -95,6 +112,10 @@ def pause_playing():
             statuses[name] = status
     paused = []
     for name in _select_to_pause(statuses):
+        # TOCTOU 缩窗:读状态后、Pause 前播放器可能已停(Pause 变 no-op 却仍被记入
+        # 恢复列表 → resume 的 Play 误启动)。Pause 前再确认仍 Playing(cc#6/kimi#3)。
+        if _playback_status(bus, name) != "Playing":
+            continue
         try:
             _call_player_method(bus, name, "Pause")
             paused.append(name)
