@@ -177,12 +177,21 @@ def stop_recording():
     text = ""  # 预置:转写若抛 BaseException(如 KeyboardInterrupt)不致 finally NameError
     try:
         m = load_model()
-        cfg = load_terms()
+        # terms 组装独立 inner try:热词问题降级到无 prompt,绝不阻断 transcribe(spec §3.5)。
+        # load_terms/build_prompt/build_transcribe_kwargs 内部已降级,这里是双保险。
+        try:
+            cfg = load_terms()
+            prompt = build_prompt(cfg.get("terms", []))
+            extra_kw = build_transcribe_kwargs(cfg)
+        except Exception as te:
+            print(f"[voice-input] terms assemble failed, degrade to no-prompt: {te}", file=sys.stderr)
+            prompt = None
+            extra_kw = {}
         segments, info = m.transcribe(
             WAVFILE,
             language="zh",
-            initial_prompt=build_prompt(cfg.get("terms", [])),
-            **build_transcribe_kwargs(cfg),
+            initial_prompt=prompt,
+            **extra_kw,
         )
         text = "".join(s.text for s in segments).strip()
     except Exception as e:

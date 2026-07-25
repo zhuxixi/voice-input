@@ -68,8 +68,46 @@ class TestBuildTranscribeKwargs(unittest.TestCase):
         self.assertEqual(build_transcribe_kwargs({"hotwords": []}), {})
 
     def test_hotwords_present_returns_kwarg(self):
+        # faster-whisper hotwords 是 Optional[str],list 须 join 成空格分隔字符串
         kw = build_transcribe_kwargs({"hotwords": ["zima", "jfox"]})
-        self.assertEqual(kw, {"hotwords": ["zima", "jfox"]})
+        self.assertEqual(kw, {"hotwords": "zima jfox"})
+
+
+class TestLoadTermsRobustness(unittest.TestCase):
+    """malformed config 安全降级(spec §3.5:任何配置问题不得阻断转写)。"""
+
+    def _with_content(self, content_bytes):
+        with tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False) as f:
+            f.write(content_bytes)
+            return f.name
+
+    def test_non_dict_json_degrades(self):
+        # JSON 顶层非 dict(裸数组) -> load_terms 降级空配置
+        path = self._with_content(b"[1,2,3]")
+        try:
+            self.assertEqual(load_terms(path), {"terms": [], "hotwords": None})
+        finally:
+            os.unlink(path)
+
+    def test_non_utf8_degrades(self):
+        # 非 UTF-8 字节 -> UnicodeDecodeError 被兜底 -> 降级
+        path = self._with_content(b"\xff\xfe\x00{")
+        try:
+            self.assertEqual(load_terms(path), {"terms": [], "hotwords": None})
+        finally:
+            os.unlink(path)
+
+    def test_terms_field_non_list_build_prompt_none(self):
+        # terms 字段非 list(string/int/dict) -> build_prompt 守卫返回 None
+        self.assertIsNone(build_prompt("zima"))
+        self.assertIsNone(build_prompt(123))
+        self.assertIsNone(build_prompt({"a": 1}))
+
+    def test_terms_list_of_nonstr_does_not_crash(self):
+        # terms=[1,2](int 元素) -> 不崩,isinstance(list) 通过后 join 成 "1、2"
+        result = build_prompt([1, 2])
+        self.assertIsNotNone(result)
+        self.assertIn("1", result)
 
 
 if __name__ == "__main__":
