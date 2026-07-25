@@ -40,3 +40,16 @@ def build_prompt(terms: list) -> "str | None":
         return None
     sample = terms[:30]
     return "以下是本次内容可能涉及的术语:" + "、".join(sample) + "。"
+
+
+def build_transcribe_kwargs(cfg: dict) -> dict:
+    """组装 transcribe 的可选参数。默认空 dict(只传 language + initial_prompt)。
+
+    hotwords 为 None/空/False 时不传(等价现状);有值时返回 {"hotwords": [...]}。
+    把可选参数组装集中一处,voice-ptt 调用处用 ** 展开。
+    """
+    kw: dict = {}
+    hotwords = cfg.get("hotwords")
+    if hotwords:
+        kw["hotwords"] = hotwords
+    return kw

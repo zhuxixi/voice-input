@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from terms import DEFAULT_TERMS_PATH, load_terms, build_prompt
+from terms import DEFAULT_TERMS_PATH, load_terms, build_prompt, build_transcribe_kwargs
 
 
 class TestLoadTerms(unittest.TestCase):
@@ -56,6 +56,20 @@ class TestBuildPrompt(unittest.TestCase):
         prompt = build_prompt(many)
         self.assertIn("term29", prompt)
         self.assertNotIn("term30", prompt)
+
+
+class TestBuildTranscribeKwargs(unittest.TestCase):
+    def test_hotwords_none_returns_empty(self):
+        # hotwords=None/缺失 -> 空 dict(不传 hotwords,等价现状)
+        self.assertEqual(build_transcribe_kwargs({"hotwords": None}), {})
+        self.assertEqual(build_transcribe_kwargs({}), {})
+
+    def test_hotwords_empty_list_returns_empty(self):
+        self.assertEqual(build_transcribe_kwargs({"hotwords": []}), {})
+
+    def test_hotwords_present_returns_kwarg(self):
+        kw = build_transcribe_kwargs({"hotwords": ["zima", "jfox"]})
+        self.assertEqual(kw, {"hotwords": ["zima", "jfox"]})
 
 
 if __name__ == "__main__":
