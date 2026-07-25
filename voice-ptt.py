@@ -18,6 +18,7 @@ import time
 import signal
 from archive import archive_recording, ARCHIVE_ENABLED
 from media_pause import pause_playing, resume, PAUSE_MEDIA_ENABLED
+from terms import load_terms, build_prompt, build_transcribe_kwargs
 import gi
 
 gi.require_version("Gtk", "3.0")
@@ -176,7 +177,13 @@ def stop_recording():
     text = ""  # 预置:转写若抛 BaseException(如 KeyboardInterrupt)不致 finally NameError
     try:
         m = load_model()
-        segments, info = m.transcribe(WAVFILE, language="zh")
+        cfg = load_terms()
+        segments, info = m.transcribe(
+            WAVFILE,
+            language="zh",
+            initial_prompt=build_prompt(cfg.get("terms", [])),
+            **build_transcribe_kwargs(cfg),
+        )
         text = "".join(s.text for s in segments).strip()
     except Exception as e:
         print(f"[voice-input] Error: {e}", file=sys.stderr)
