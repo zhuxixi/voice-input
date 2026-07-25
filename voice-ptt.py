@@ -113,9 +113,7 @@ def start_recording():
             # pause_playing 返回 [](媒体已被我们暂停),不清空旧值,留给 stop resume
             _paused_players = _paused_players + paused
     rec_proc = subprocess.Popen(
-        # 走 PipeWire "default" 后端(默认 source=PD200X),由 PW 重采样共享,
-        # 避免与 GNOME 等电平表监听抢占 ALSA 硬件节点(hw:3)导致 EBUSY 静默失败
-        ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-D", "default", WAVFILE],
+        ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-D", "hw:3", WAVFILE],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
     GLib.idle_add(show_overlay, "● REC", "#ff5555")
