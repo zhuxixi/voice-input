@@ -113,9 +113,11 @@ def start_recording():
             # pause_playing 返回 [](媒体已被我们暂停),不清空旧值,留给 stop resume。
             # 去重:外部恢复后又重新暂停的同一播放器不重复累加,免 resume 重复 Play(cc#9)。
             _paused_players = list(dict.fromkeys(_paused_players + paused))
+    # 走 PipeWire "default" 后端（默认 source=PD200X），由 PW 重采样共享，
+    # 避免与 GNOME 等电平表监听抢占 ALSA 硬件节点(hw:3)导致 EBUSY 静默失败（#6）
     rec_proc = subprocess.Popen(
-        ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-D", "hw:3", WAVFILE],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-D", "default", WAVFILE],
+        stdout=subprocess.DEVNULL, stderr=sys.stderr
     )
     GLib.idle_add(show_overlay, "● REC", "#ff5555")
     print("[voice-input] Recording...", flush=True)
@@ -168,6 +170,7 @@ def stop_recording():
     time.sleep(0.3)
 
     if not os.path.exists(WAVFILE) or os.path.getsize(WAVFILE) < 1000:
+        print("[voice-input] recording empty/too short (<1KB); arecord may have failed (EBUSY/device busy?)", file=sys.stderr)
         return
 
     text = ""  # 预置:转写若抛 BaseException(如 KeyboardInterrupt)不致 finally NameError
