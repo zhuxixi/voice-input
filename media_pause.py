@@ -20,8 +20,9 @@ DBUS_PATH = "/org/freedesktop/DBus"
 DBUS_IFACE = "org.freedesktop.DBus"
 
 # 单次 D-Bus call_sync 超时(ms)。默认 -1≈25s,某播放器无响应会阻塞按键回调。
-# 显式 2s 让单次故障快速失败。注意:pause_playing 串行 (1+2N) 次调用,累积最坏
-# (1+2N)×2s;典型 Chrome 响应 ms 级,仅播放器 hung 时才逼近上界(cc#11 残留)。
+# 显式 2s 让单次故障快速失败。注意:pause_playing 串行 (1+3N) 次调用(ListNames
+# + N×Get + N×TOCTOU 二次Get + N×Pause),累积最坏 (1+3N)×2s;典型 Chrome 响应
+# ms 级,仅播放器 hung 时才逼近上界(cc#11 残留,接受)。
 _DBUS_TIMEOUT_MSEC = 2000
 
 # 惰性导入:Gio/GLib 首次使用时才 import(见 _ensure_gi)。
@@ -113,8 +114,10 @@ def pause_playing():
     paused = []
     for name in _select_to_pause(statuses):
         # TOCTOU 缩窗:读状态后、Pause 前播放器可能已停(Pause 变 no-op 却仍被记入
-        # 恢复列表 → resume 的 Play 误启动)。Pause 前再确认仍 Playing(cc#6/kimi#3)。
-        if _playback_status(bus, name) != "Playing":
+        # 恢复列表 → resume 的 Play 误启动)。Pause 前再确认。二次读返回 None(瞬时
+        # D-Bus 故障)时不跳过——之前已确认 Playing,按 best-effort 继续 Pause,免回归(cc#12)。
+        second = _playback_status(bus, name)
+        if second is not None and second != "Playing":
             continue
         try:
             _call_player_method(bus, name, "Pause")
