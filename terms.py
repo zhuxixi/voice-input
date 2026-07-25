@@ -54,6 +54,11 @@ def build_transcribe_kwargs(cfg: dict) -> dict:
     """
     kw: dict = {}
     hotwords = cfg.get("hotwords")
-    if hotwords:
-        kw["hotwords"] = " ".join(hotwords) if isinstance(hotwords, list) else hotwords
+    if isinstance(hotwords, list) and hotwords:
+        joined = " ".join(str(h) for h in hotwords)
+        if joined:                       # 空 list/全空元素 → 不传
+            kw["hotwords"] = joined
+    elif isinstance(hotwords, str) and hotwords.strip():
+        kw["hotwords"] = hotwords
+    # 其他类型(int/dict/bool)及空值不传:faster-whisper hotwords 是 Optional[str],非 str 经 .strip() 崩
     return kw

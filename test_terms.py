@@ -72,6 +72,23 @@ class TestBuildTranscribeKwargs(unittest.TestCase):
         kw = build_transcribe_kwargs({"hotwords": ["zima", "jfox"]})
         self.assertEqual(kw, {"hotwords": "zima jfox"})
 
+    def test_hotwords_str_passed_through(self):
+        self.assertEqual(build_transcribe_kwargs({"hotwords": "zima jfox"}), {"hotwords": "zima jfox"})
+
+    def test_hotwords_int_not_passed(self):
+        # 非 list/str 真值(int)不传,避免 faster-whisper .strip() 崩
+        self.assertEqual(build_transcribe_kwargs({"hotwords": 123}), {})
+
+    def test_hotwords_dict_not_passed(self):
+        self.assertEqual(build_transcribe_kwargs({"hotwords": {"a": "b"}}), {})
+
+    def test_hotwords_bool_not_passed(self):
+        self.assertEqual(build_transcribe_kwargs({"hotwords": True}), {})
+
+    def test_hotwords_list_nonstr_joined(self):
+        # list 非 str 元素 join 成 str(不崩)
+        self.assertEqual(build_transcribe_kwargs({"hotwords": [1, 2]}), {"hotwords": "1 2"})
+
 
 class TestLoadTermsRobustness(unittest.TestCase):
     """malformed config 安全降级(spec §3.5:任何配置问题不得阻断转写)。"""

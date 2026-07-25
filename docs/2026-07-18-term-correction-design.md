@@ -50,13 +50,16 @@
 ### 3.1 数据流
 
 ```
-按住右 Cmd 录音 → stop_recording
-  179  m.transcribe(WAVFILE, language="zh",
-         initial_prompt=build_prompt(cfg["terms"]),   ← 软热词(源头引导)
-         **build_transcribe_kwargs(cfg))              ← hotwords 可选,默认不传
-  180  text = "".join(s.text for s in segments).strip()
-  188  archive_recording(WAVFILE, text, text)         ← 不变(纯 terms,raw==final)
-  194  写剪贴板 → 粘贴
+按住右 Cmd 录音 → stop_recording (voice-ptt.py,行号随实现变动不硬标)
+  m = load_model()
+  # terms 组装独立 inner try(异常降级到无 prompt,不阻断 transcribe,见 §3.5)
+  cfg    = load_terms()
+  prompt = build_prompt(cfg.get("terms", []))     ← 软热词(源头引导)
+  extra  = build_transcribe_kwargs(cfg)           ← hotwords 可选,默认不传
+  m.transcribe(WAVFILE, language="zh", initial_prompt=prompt, **extra)
+  text = "".join(s.text for s in segments).strip()
+  archive_recording(WAVFILE, text, text)          ← 不变(纯 terms,raw==final)
+  写剪贴板 → 粘贴
 ```
 
 terms 作为解码上文: 模型"见过"这些词的正确拼写,解码到对应发音时倾向照抄 → 整句因关键名词对了而正确。
@@ -92,13 +95,12 @@ def load_terms(path=DEFAULT_TERMS_PATH):
     try:
         with open(path, encoding="utf-8") as f:
             cfg = json.load(f)
+        if not isinstance(cfg, dict):        # 顶层非 dict(裸数组/字符串)降级
+            return {"terms": [], "hotwords": None}
         cfg.setdefault("terms", [])
         cfg.setdefault("hotwords", None)
         return cfg
-    except FileNotFoundError:
-        return {"terms": [], "hotwords": None}
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"[voice-input] terms.json parse failed: {e}", file=sys.stderr)
+    except Exception:                        # 覆盖 FileNotFoundError/JSONDecodeError/UnicodeDecodeError 等,降级不阻断
         return {"terms": [], "hotwords": None}
 ```
 
@@ -108,10 +110,10 @@ def load_terms(path=DEFAULT_TERMS_PATH):
 
 ```python
 def build_prompt(terms):
-    if not terms:
+    if not isinstance(terms, list) or not terms:   # 非 list(string/int/dict)降级
         return None
-    sample = terms[:30]  # 截断,控 token(Whisper initial_prompt 上限 224)
-    return "以下是本次内容可能涉及的术语:" + "、".join(sample) + "。"
+    sample = terms[:30]   # 截断 30 个 term 控规模(Whisper initial_prompt 上限 224 token 的近似)
+    return "以下是本次内容可能涉及的术语:" + "、".join(str(t) for t in sample) + "。"
 ```
 
 返回 `None` 时 `transcribe` 不传 prompt(等价现状)。措辞(中文句包装 vs 纯词列表)留作实测调优点。
@@ -122,8 +124,11 @@ def build_prompt(terms):
 def build_transcribe_kwargs(cfg):
     kw = {}
     hotwords = cfg.get("hotwords")
-    if hotwords:  # None/空/False 不传 → 等价现状
+    if isinstance(hotwords, list) and hotwords:
+        kw["hotwords"] = " ".join(str(h) for h in hotwords)   # 非空 list join 成 str
+    elif isinstance(hotwords, str) and hotwords.strip():
         kw["hotwords"] = hotwords
+    # 其他类型(int/dict/bool)及空值不传:faster-whisper hotwords 是 Optional[str],非 str 经 .strip() 崩
     return kw
 ```
 
