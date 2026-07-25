@@ -11,6 +11,7 @@ Linux 语音输入工具 — 按住快捷键录音，松开即转写并输入到
 - **屏幕提示**：录音时显示红色 "● REC"，完成后显示蓝色 "DONE"
 - **GPU 加速**：使用 CUDA + faster-whisper large-v3 模型，转写速度快
 - **中英混合**：支持中文、英文及混合语音识别
+- **自动暂停媒体**：录音时自动暂停正在外放的音乐/视频（Chrome 等支持 MPRIS 的播放器），结束后自动恢复
 - **开机自启**：支持 GNOME autostart，登录即运行
 
 ## 依赖
@@ -58,6 +59,10 @@ nohup ./voice-ptt.sh &
 
 默认每次录音的音频 + 转写结果会归档到 `~/.local/share/voice-input/recordings/`（每条一目录 + `index.jsonl` 索引），供回溯与评测。关闭：`VOICE_INPUT_ARCHIVE=0 ./voice-ptt.sh`。
 
+### 媒体自动暂停
+
+录音开始时自动暂停正在外放的媒体（Chrome 等通过 MPRIS 暴露的播放器），避免外放声音被麦克风收进去干扰识别；录音结束（松手后）自动恢复播放。零新依赖（走系统 D-Bus）。关闭：`VOICE_INPUT_PAUSE_MEDIA=0 ./voice-ptt.sh`。
+
 ### 开机自启
 
 ```bash
@@ -83,6 +88,7 @@ EOF
 | `voice-ptt.sh` | 启动脚本（设置 CUDA 环境变量） |
 | `voice-ptt.py` | 主程序（按住录音模式，GTK 浮层提示） |
 | `archive.py` | 录音归档（音频 + 转写文本存到 `~/.local/share/voice-input/recordings/`） |
+| `media_pause.py` | 录音时自动暂停/恢复 MPRIS 媒体（Chrome 等），走系统 D-Bus，零依赖 |
 | `voice-toggle.sh` | 切换模式脚本（按一下开始/停止） |
 | `test-mic.sh` | 麦克风测试 |
 | `download-model.sh` | 模型下载（hf-mirror.com，中国网络友好） |
