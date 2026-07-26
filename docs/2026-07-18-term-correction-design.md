@@ -186,9 +186,9 @@ segments, info = m.transcribe(
 - `load_terms()` 文件缺失 → `{"terms":[],"hotwords":None}` 不抛异常
 - `load_terms()` JSON 错 → 空 dict + 不抛
 - `build_transcribe_kwargs({"hotwords":None})` → `{}`(空,不传 hotwords)
-- `build_transcribe_kwargs({"hotwords":["zima"]})` → `{"hotwords":["zima"]}`
+- `build_transcribe_kwargs({"hotwords":["zima"]})` → `{"hotwords":"zima"}`(list join 成 str)
 
-`terms.py` 无 GTK import,可独立 `pytest`(先例: `test_archive.py`/`test_media_pause.py`)。
+`terms.py` 无 GTK import,可独立 `python -m unittest`(venv 无 pytest;先例: `test_archive.py`/`test_media_pause.py`)。
 
 ## 6. 渐进路线
 

@@ -32,7 +32,7 @@ def load_terms(path: str = DEFAULT_TERMS_PATH) -> dict:
         return {"terms": [], "hotwords": None}
 
 
-def build_prompt(terms) -> "str | None":
+def build_prompt(terms: list) -> "str | None":
     """把 terms 嵌入一句自然中文,作为 Whisper initial_prompt(解码上文)。
 
     空 terms 或非 list(string/int/dict) -> None(transcribe 不传 prompt,等价现状)。
@@ -56,7 +56,7 @@ def build_transcribe_kwargs(cfg: dict) -> dict:
     hotwords = cfg.get("hotwords")
     if isinstance(hotwords, list) and hotwords:
         joined = " ".join(str(h) for h in hotwords)
-        if joined:                       # 空 list/全空元素 → 不传
+        if joined.strip():               # 空 list/全空白元素 → 不传
             kw["hotwords"] = joined
     elif isinstance(hotwords, str) and hotwords.strip():
         kw["hotwords"] = hotwords

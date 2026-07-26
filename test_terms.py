@@ -89,6 +89,11 @@ class TestBuildTranscribeKwargs(unittest.TestCase):
         # list 非 str 元素 join 成 str(不崩)
         self.assertEqual(build_transcribe_kwargs({"hotwords": [1, 2]}), {"hotwords": "1 2"})
 
+    def test_hotwords_all_blank_list_not_passed(self):
+        # 全空白元素 list(["",""] / [" "," "])join 得空格串,strip 后不传
+        self.assertEqual(build_transcribe_kwargs({"hotwords": ["", ""]}), {})
+        self.assertEqual(build_transcribe_kwargs({"hotwords": [" ", " "]}), {})
+
 
 class TestLoadTermsRobustness(unittest.TestCase):
     """malformed config 安全降级(spec §3.5:任何配置问题不得阻断转写)。"""
