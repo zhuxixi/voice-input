@@ -2,3 +2,6 @@ venv/
 __pycache__/
 *.wav
 *.pyc
+
+# 归档数据(音频+转写,本地不进 git)
+recordings/
