@@ -1,69 +1,103 @@
 # voice-input
 
-Linux 语音输入工具 — 按住快捷键录音，松开即转写并输入到当前窗口。
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%28X11%29-lightgrey.svg)](#requirements)
+[![CUDA](https://img.shields.io/badge/engine-CUDA%20%2B%20faster--whisper-76b900.svg)](#model-notes)
 
-基于 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2) + CUDA GPU 加速，实时语音转文字。
+**English** | [简体中文](README.zh-CN.md)
 
-## 功能
+Push-to-talk voice input for Linux: hold a hotkey to record, release to transcribe
+locally with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on your GPU,
+and the text is typed into whatever window you were using. 100% offline — nothing
+leaves your machine.
 
-- **按住录音**：按住右 Command（Alt_R）键开始录音，松开自动转写
-- **即时上屏**：转写结果自动粘贴到当前活跃窗口
-- **屏幕提示**：录音时显示红色 "● REC"，完成后显示蓝色 "DONE"
-- **GPU 加速**：使用 CUDA + faster-whisper large-v3 模型，转写速度快
-- **中英混合**：支持中文、英文及混合语音识别
-- **自动暂停媒体**：录音时自动暂停正在外放的音乐/视频（Chrome 等支持 MPRIS 的播放器），结束后自动恢复
-- **开机自启**：支持 GNOME autostart，登录即运行
+## Table of Contents
 
-## 依赖
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [How It Works](#how-it-works)
+- [Project Layout](#project-layout)
+- [Model Notes](#model-notes)
+- [Resource Usage](#resource-usage)
+- [Hardware Reference](#hardware-reference)
+- [Roadmap](#roadmap)
+- [Testing](#testing)
+- [License](#license)
 
-- Linux (X11, 已测试 Ubuntu 24.04)
+## Features
+
+- **Push-to-talk**: hold the right Command key (Alt_R) to record; release to transcribe
+- **Instant typing**: the transcript is pasted automatically into the window that was
+  active when you started recording
+- **On-screen overlay**: red "● REC" while recording, blue "DONE" when finished
+- **GPU accelerated**: faster-whisper large-v3 on CUDA; the model stays resident in
+  VRAM, so transcription after key release is nearly instantaneous
+- **Chinese / English / mixed speech**
+- **Custom vocabulary (hotwords)**: bias recognition toward your jargon via a simple
+  `terms.json`; a broken or missing file degrades gracefully and never blocks
+  transcription
+- **Auto media pause**: pauses playing media (Chrome and other MPRIS players) while
+  you record so it doesn't leak into the mic, then resumes it afterwards — via system
+  D-Bus, zero extra dependencies
+- **Recording archive**: every recording (audio + transcript) is stored locally under
+  `~/.local/share/voice-input/recordings/` for later review or building an eval set;
+  can be disabled
+- **Autostart**: works with GNOME autostart
+
+## Requirements
+
+- Linux with X11 (tested on Ubuntu 24.04)
 - NVIDIA GPU + CUDA
 - Python 3.12
-- ALSA (`arecord`)
+- ALSA (`arecord`) and PipeWire (capture goes through the `default` source)
 - `xdotool`, `xsel`
-- GTK3 (`gi`)
-- faster-whisper + ctranslate2
-- pynput
+- GTK3 (`gi`) on the system Python
+- faster-whisper + ctranslate2, pynput (installed in a venv)
 
-## 安装
+## Installation
 
 ```bash
-# 1. 克隆
+# 1. Clone
 git clone https://github.com/zhuxixi/voice-input.git
 cd voice-input
 
-# 2. 创建 venv 并安装依赖
+# 2. Create a venv and install dependencies
 python3 -m venv venv
 ./venv/bin/pip install faster-whisper pynput nvidia-cublas-cu12 nvidia-cudnn-cu12 nvidia-cuda-nvrtc-cu12
 
-# 3. 下载模型
+# 3. Download the model
 ./download-model.sh
 ```
 
-## 使用
+> **Important — hardcoded paths (for now)**: until #11 lands, the launcher scripts
+> hardcode the original author's absolute install path. After cloning, search for
+> `/home/` in `voice-ptt.sh`, `voice-toggle.sh`, `download-model.sh`, `test-mic.sh`
+> and `voice-ptt.py` (the `VENV=` / `exec` lines) and replace it with the absolute
+> path of your clone. This is tracked in #11 and will become unnecessary once
+> scripts derive their location automatically.
+
+## Usage
 
 ```bash
-# 测试麦克风
+# Test your microphone first
 ./test-mic.sh
 
-# 启动语音输入
+# Start (foreground; Ctrl+C to quit)
 ./voice-ptt.sh
 
-# 后台运行
+# Or in the background
 nohup ./voice-ptt.sh &
 ```
 
-启动后按住 **右 Command 键**（Mac 键盘）录音，松开自动转写并输入。
+On startup the model preloads (a few seconds), then you're ready: hold the **right
+Command key** (Mac keyboards) — on PC keyboards this is **right Alt** — speak, and
+release. The transcript is typed into the window you were using.
 
-### 录音归档
-
-默认每次录音的音频 + 转写结果会归档到 `~/.local/share/voice-input/recordings/`（每条一目录 + `index.jsonl` 索引），供回溯与评测。关闭：`VOICE_INPUT_ARCHIVE=0 ./voice-ptt.sh`。
-
-### 媒体自动暂停
-
-录音开始时自动暂停正在外放的媒体（Chrome 等通过 MPRIS 暴露的播放器），避免外放声音被麦克风收进去干扰识别；录音结束（松手后）自动恢复播放。零新依赖（走系统 D-Bus）。关闭：`VOICE_INPUT_PAUSE_MEDIA=0 ./voice-ptt.sh`。
-
-### 开机自启
+### Autostart (GNOME)
 
 ```bash
 mkdir -p ~/.config/autostart
@@ -71,7 +105,7 @@ cat > ~/.config/autostart/voice-input.desktop << 'EOF'
 [Desktop Entry]
 Type=Application
 Name=Voice Input
-Comment=按住右 Command 键录音，松开转写并输入
+Comment=Push-to-talk voice input (hold right Command to record)
 Exec=/path/to/voice-input/voice-ptt.sh
 Hidden=false
 NoDisplay=false
@@ -79,101 +113,156 @@ X-GNOME-Autostart-enabled=true
 EOF
 ```
 
-将 `Exec` 路径改为实际安装路径。
+Adjust the `Exec` path to your actual install location.
 
-## 文件说明
+## Configuration
 
-| 文件 | 说明 |
+All settings with their defaults and how to change them:
+
+| Setting | Default | Effect | How to change |
+|---|---|---|---|
+| `VOICE_INPUT_ARCHIVE` | `1` (on) | Archive each recording (audio + transcript) to `~/.local/share/voice-input/recordings/` (one directory per recording + an `index.jsonl` index) | `VOICE_INPUT_ARCHIVE=0 ./voice-ptt.sh` |
+| `VOICE_INPUT_PAUSE_MEDIA` | `1` (on) | Auto-pause MPRIS players (Chrome etc.) while recording, resume after release | `VOICE_INPUT_PAUSE_MEDIA=0 ./voice-ptt.sh` |
+| `~/.config/voice-input/terms.json` | (none) | Custom vocabulary hotwords, see below | Edit the file |
+
+### Custom vocabulary (hotwords)
+
+`~/.config/voice-input/terms.json`:
+
+```json
+{
+  "terms": ["Claude", "git", "diff", "pull request"],
+  "hotwords": null
+}
+```
+
+- **`terms`** — a list of words or phrases embedded into the Whisper `initial_prompt`
+  (first 30 entries) to bias recognition toward your vocabulary (proper nouns,
+  project names, technical terms).
+- **`hotwords`** — `null`, a list, or a space-separated string forwarded to
+  faster-whisper's `hotwords` parameter.
+- **Robustness**: a missing, malformed, or non-UTF-8 `terms.json` never breaks
+  transcription — the program degrades to plain transcription and logs a warning.
+
+## How It Works
+
+1. **Key press** — the active window is remembered, MPRIS media is paused, and
+   `arecord` starts recording (16 kHz mono).
+2. **Key release** — recording stops and the model transcribes (Chinese, large-v3
+   float16 on CUDA).
+3. **Typing** — the text goes to the clipboard (`xsel`) and is pasted into the
+   remembered window (`xdotool key ctrl+shift+v`).
+4. **Cleanup** — the recording and transcript are archived (if enabled) and media
+   playback resumes.
+
+### Audio capture
+
+Recording uses the ALSA `default` device, which is served by PipeWire, so the
+microphone is shared with other apps (e.g., the GNOME sound-settings level meter)
+instead of being grabbed exclusively — direct hardware access (`hw:*`) caused EBUSY
+failures when another app held the device (#6). To use a different microphone, set
+your system default source:
+
+```bash
+pactl set-default-source <source-name>   # or: wpctl set-default <id>
+```
+
+Use `arecord -l` only to troubleshoot raw devices, not to pick the capture device.
+
+## Project Layout
+
+| File | Description |
 |---|---|
-| `voice-ptt.sh` | 启动脚本（设置 CUDA 环境变量） |
-| `voice-ptt.py` | 主程序（按住录音模式，GTK 浮层提示） |
-| `archive.py` | 录音归档（音频 + 转写文本存到 `~/.local/share/voice-input/recordings/`） |
-| `media_pause.py` | 录音时自动暂停/恢复 MPRIS 媒体（Chrome 等），走系统 D-Bus，零依赖 |
-| `voice-toggle.sh` | 切换模式脚本（按一下开始/停止） |
-| `test-mic.sh` | 麦克风测试 |
-| `download-model.sh` | 模型下载（hf-mirror.com，中国网络友好） |
-| `download-model.py` | 模型下载（DoH DNS 修复，绕过 DNS 污染） |
+| `voice-ptt.sh` | Launcher: sets CUDA library paths, runs with system Python + venv packages |
+| `voice-ptt.py` | Main program: push-to-talk, GTK overlay, transcription, typing |
+| `terms.py` | Hotwords: loads `terms.json`, builds `initial_prompt` + transcribe kwargs |
+| `archive.py` | Archives each recording (audio + transcript) under `~/.local/share/voice-input/recordings/` with an `index.jsonl` index |
+| `media_pause.py` | Pauses/resumes MPRIS media via D-Bus; zero extra dependencies |
+| `voice-toggle.sh` | Alternative toggle mode: press once to start, press again to stop and type |
+| `test-mic.sh` | Microphone test |
+| `download-model.sh` / `download-model.py` | Model download (hf-mirror.com mirror + DoH DNS workaround for polluted DNS) |
+| `test_terms.py` / `test_archive.py` / `test_media_pause.py` | Unit tests (stdlib `unittest`) |
+| `docs/` | Design documents (Chinese) |
 
-## 关于模型
+## Model Notes
 
-使用的是 **OpenAI Whisper large-v3** 模型，由 [Systran](https://github.com/SYSTRAN)（法国，1968 年成立的 NLP 公司）通过 [CTranslate2](https://github.com/OpenNMT/CTranslate2) 格式转换并维护（即 faster-whisper 项目）。
+The model is **OpenAI Whisper large-v3**, converted to
+[CTranslate2](https://github.com/OpenNMT/CTranslate2) format and maintained by
+[Systran](https://github.com/SYSTRAN) (the [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+project).
 
-- **模型训练数据**：68 万小时标注音频，多语种
-- **架构**：Transformer Seq2Seq（自回归）
-- **推理引擎**：CTranslate2，比原版 openai/whisper 快 4 倍，显存省 38%
-- **模型大小**：2.9 GB
+- Trained on 680k hours of labeled audio, multilingual
+- Transformer seq2seq (autoregressive)
+- CTranslate2 inference: ~4x faster than openai/whisper, ~38% less memory
+- Model size: 2.9 GB download; float16 on CUDA occupies ~3.9 GB VRAM resident
 
-### Whisper 模型家族
+### Whisper model family
 
-| 模型 | 参数量 | 显存 | 相对速度 | 精度 |
+| Model | Parameters | VRAM | Relative speed | Accuracy |
 |---|---|---|---|---|
-| tiny | 39M | ~1 GB | ~10x | 基础 |
-| base | 74M | ~1 GB | ~7x | 一般 |
-| small | 244M | ~2 GB | ~4x | 较好 |
-| medium | 769M | ~5 GB | ~2x | 很好 |
-| **large-v3** | **1550M** | **~10 GB** | **1x** | **最佳** |
-| turbo | 809M | ~6 GB | ~8x | 接近 large |
+| tiny | 39M | ~1 GB | ~10x | basic |
+| base | 74M | ~1 GB | ~7x | fair |
+| small | 244M | ~2 GB | ~4x | good |
+| medium | 769M | ~5 GB | ~2x | very good |
+| **large-v3** | **1550M** | **~10 GB** | **1x** | **best** |
+| turbo | 809M | ~6 GB | ~8x | near large |
 
-当前使用 large-v3 + float16，实际显存占用约 3.9 GB。
+This project uses large-v3 + float16 (~3.9 GB VRAM in practice).
 
-## 资源占用
+## Resource Usage
 
-在双 RTX 2080 Ti (22.5GB) 上的实测数据：
+Measured on a dual RTX 2080 Ti (22.5 GB) machine:
 
-| 项目 | 占用 |
+| Component | Usage |
 |---|---|
-| Whisper 模型（常驻） | ~3946 MB |
+| Whisper model (resident) | ~3946 MB |
 | Xorg + GNOME | ~558 MB |
-| 合计 GPU 0 | ~9286 MB / 22528 MB (41%) |
+| GPU 0 total | ~9286 MB / 22528 MB (41%) |
 
-模型预加载常驻显存，每次按键松开后转写几乎瞬时完成（无需重新加载模型）。
+The model is preloaded and stays resident, so transcription after key release is
+nearly instantaneous (no reload per utterance).
 
-## 硬件
+## Hardware Reference
 
-- **麦克风**：闪克 Maono PD200X USB 动圈麦克风
-  - USB 接口内置 ADC，模拟路径短，抗主板 EMI 干扰
-  - 动圈麦克风天然抑制环境噪声，适合桌面语音输入
-  - Linux 下 ALSA UAC2 即插即用
-- **声卡设备**：`hw:3`（USB 音频，ALSA 自动识别）
+The author's setup, for reference:
 
-根据实际设备修改脚本中的 `-D hw:3` 参数。用 `arecord -l` 查看可用设备。
+- **Microphone**: Maono PD200X USB dynamic microphone
+  - Built-in ADC over USB: short analog path, resistant to mainboard EMI
+  - Dynamic capsule naturally rejects ambient noise — well suited for desk voice input
+  - Plug-and-play on Linux via ALSA UAC2
+- Capture goes through the PipeWire default source (see [Audio capture](#audio-capture))
 
 ## Roadmap
 
-以下为未来可能改进的方向，当前体验已经很好，按需推进。
+- [x] **Custom vocabulary** — soft hotwords via `initial_prompt` (#4). Possible
+  follow-up: post-processing correction for known misrecognitions.
+- **Punctuation**: Whisper's Chinese punctuation is unstable. Options:
+  [FunASR](https://github.com/modelscope/FunASR) ct-punc as a post-processing step,
+  or SenseVoice-Small (punctuation built in, see below).
+- **SenseVoice-Small upgrade** — [FunAudioLLM/SenseVoice-Small](https://github.com/FunAudioLLM/SenseVoice)
+  is the leading alternative:
 
-### 标点符号
+  | | faster-whisper large-v3 (current) | SenseVoice-Small |
+  |---|---|---|
+  | Architecture | autoregressive | **non-autoregressive** (parallel) |
+  | Parameters | 1550M | ~234M |
+  | VRAM | ~3.9 GB | **~1.5 GB** |
+  | Speed | ~1281 ms / 10 s | **~70 ms / 10 s (15x faster)** |
+  | Chinese accuracy | good | **better** |
+  | Punctuation | unstable | **built in** |
+  | Model size | 2.9 GB | 827 MB |
+  | Languages | 99+ | 50+ (focus: zh/ja/ko/yue/en) |
 
-Whisper 对中文标点支持不稳定。可选方案：
+- **Windows support** (#9): light platform detection, swap the OS-specific outer layer.
 
-- **FunASR ct-punc**：标点恢复模型，作为后处理步骤插入
-- **SenseVoice-Small**：内置标点，无需额外模型（见下方升级方案）
+## Testing
 
-### 自定义词汇
+```bash
+python3 -m unittest test_terms test_archive test_media_pause -v
+```
 
-口语中的专有名词（Claude Code、diff、git、PR 等）识别不够准确。可选方案：
-
-- **Whisper `initial_prompt`**：传入关键词提示，引导识别
-- **SenseVoice hotword**：神经网路热词增强
-- **FunASR 自定义词典**：导入专属词汇表
-
-### SenseVoice-Small 升级
-
-[阿里达摩院 SenseVoice-Small](https://github.com/FunAudioLLM/SenseVoice) 是首选替代方案：
-
-| | faster-whisper large-v3 (当前) | SenseVoice-Small |
-|---|---|---|
-| 架构 | 自回归 | **非自回归**（并行） |
-| 参数量 | 1550M | ~234M |
-| 显存 | ~3.9 GB | **~1.5 GB** |
-| 推理速度 | ~1281ms/10s | **~70ms/10s (15x 更快)** |
-| 中文准确率 | 好 | **更好** |
-| 标点 | 不稳定 | **内置** |
-| 模型大小 | 2.9 GB | 827 MB |
-| 语言 | 99+ | 50+（中日韩粤英为主） |
-
-切换条件：如果未来 Whisper 中文识别不够用，或者需要标点支持。
+The tests use only the standard library and don't touch the GPU.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
