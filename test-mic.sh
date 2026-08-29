@@ -5,7 +5,9 @@
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 VENV="$REPO_DIR/venv"
 
-SITE_PACKAGES="$(ls -d "$VENV"/lib/python3.*/site-packages 2>/dev/null | head -1)"
+# Ask the venv interpreter for its site-packages (#11): survives in-place
+# venv rebuilds that would leave a stale lib/python3.x dir behind.
+SITE_PACKAGES="$($VENV/bin/python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)"
 if [ -z "$SITE_PACKAGES" ]; then
     echo "test-mic.sh: venv not found under $REPO_DIR — see README Installation" >&2
     exit 1

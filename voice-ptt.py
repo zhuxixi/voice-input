@@ -1,23 +1,35 @@
 #!/usr/bin/env python3
 """按住右 Command 键录音，松开转写并输入到当前窗口。"""
 
-import glob
 import os
+import subprocess
 import sys
 
 # Derive the repo location from this file (#11): works from any clone path.
-_REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+# realpath matches the shell wrappers' readlink -f, so invoking through a
+# symlink (e.g. exposing the script in PATH) still finds the repo.
+_REPO_DIR = os.path.dirname(os.path.realpath(__file__))
 VENV = os.path.join(_REPO_DIR, "venv")
 
-# Locate venv site-packages without pinning the python3.x version.
-_SITE_MATCHES = sorted(glob.glob(os.path.join(VENV, "lib", "python3*", "site-packages")))
-if not _SITE_MATCHES:
+# Ask the venv's own interpreter where its site-packages are (#11): survives
+# in-place venv rebuilds that would leave a stale lib/python3.x dir behind.
+try:
+    _SITE = subprocess.check_output(
+        [
+            os.path.join(VENV, "bin", "python3"),
+            "-c",
+            "import sysconfig; print(sysconfig.get_paths()['purelib'])",
+        ],
+        stderr=subprocess.DEVNULL,
+    ).decode().strip()
+except Exception:
+    _SITE = ""
+if not _SITE or not os.path.isdir(_SITE):
     sys.stderr.write(
         f"[voice-input] venv site-packages not found under {VENV} — "
         "see README Installation\n"
     )
     sys.exit(1)
-_SITE = _SITE_MATCHES[0]
 os.environ["LD_LIBRARY_PATH"] = (
     f"{_SITE}/nvidia/cublas/lib:"
     f"{_SITE}/nvidia/cudnn/lib:"
@@ -25,7 +37,6 @@ os.environ["LD_LIBRARY_PATH"] = (
     + (f':{os.environ.get("LD_LIBRARY_PATH", "")}')
 )
 
-import subprocess
 import threading
 import time
 import signal
@@ -267,7 +278,12 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     print("[voice-input] Preloading model...", flush=True)
-    load_model()
+    try:
+        load_model()
+    except RuntimeError as e:
+        # _resolve_model_path 的可行动错误应像 venv 守卫一样干净退出,而非裸 traceback
+        sys.stderr.write(f"[voice-input] {e}\n")
+        sys.exit(1)
     print("[voice-input] Ready! 按住右 Command 键录音，松开转写", flush=True)
     print("[voice-input] Ctrl+C 退出", flush=True)
 
