@@ -33,7 +33,7 @@ Linux 语音输入工具 — 按住快捷键录音，松开即转写并输入到
 - **即时上屏**：转写结果自动粘贴到录音时的活跃窗口
 - **屏幕提示**：录音时显示红色 "● REC"，完成后显示蓝色 "DONE"
 - **GPU 加速**：CUDA + faster-whisper large-v3，模型常驻显存，松手后转写几乎瞬时
-- **中英混合**：支持中文、英文及混合语音识别
+- **中文及中英混合**：转写固定为 `language="zh"`，支持中文与中英混合口语
 - **自定义词汇（热词）**：通过 `terms.json` 引导专有名词识别；配置损坏自动降级，不阻断转写
 - **自动暂停媒体**：录音时自动暂停正在外放的音乐/视频（Chrome 等支持 MPRIS 的播放器），结束后自动恢复，零新依赖（走系统 D-Bus）
 - **录音归档**：每次录音的音频 + 转写结果归档到本地 `~/.local/share/voice-input/recordings/`，供回溯与评测，可关闭
@@ -64,7 +64,9 @@ python3 -m venv venv
 ./download-model.sh
 ```
 
-> **注意（暂存的硬编码路径）**：在 #11 落地之前，启动脚本里硬编码了原作者机器上的绝对路径。克隆后请在 `voice-ptt.sh`、`voice-toggle.sh`、`download-model.sh`、`test-mic.sh`、`voice-ptt.py` 中搜索 `/home/`（`VENV=` / `exec` 相关行），替换为你自己克隆目录的绝对路径。#11 将改为脚本自动推导自身位置，届时无需此步骤。
+> **注意（暂存的硬编码路径）**：在 #11 落地之前，启动脚本里硬编码了原作者机器上的绝对路径。克隆后请在以下脚本文件中搜索 `/home/`（`VENV=` / `exec` 相关行），替换为你自己克隆目录的绝对路径：`voice-ptt.sh`、`voice-toggle.sh`、`download-model.sh`、`test-mic.sh`、`voice-ptt.py`。#11 将改为脚本自动推导自身位置，届时无需此步骤。
+>
+> **模型快照路径**：`download-model.sh` 会把模型解包到 `.../snapshots/downloaded`，而代码加载的是带哈希的快照目录（`.../snapshots/edaa852e...`）。下载完成后需对齐二者——把 `downloaded` 目录改名为代码期望的哈希目录名，或修改 `voice-ptt.py` / `test-mic.sh` / `voice-toggle.sh` 中的 `MODEL_PATH`。（同样待 #11 一并清理。）
 
 ## 使用
 
@@ -78,6 +80,8 @@ python3 -m venv venv
 # 后台运行
 nohup ./voice-ptt.sh &
 ```
+
+（`test-mic.sh` 与 `voice-toggle.sh` 目前仍用作者声卡的 `-D hw:3` 直录；其他机器请改为 `-D default`。）
 
 启动后先预加载模型（几秒），随后按住 **右 Command 键**（Mac 键盘；PC 键盘对应 **右 Alt 键**）说话，松开即转写并输入。
 
@@ -154,7 +158,7 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 | `test-mic.sh` | 麦克风测试 |
 | `download-model.sh` / `download-model.py` | 模型下载（hf-mirror.com 镜像 + DoH DNS 修复，绕过 DNS 污染） |
 | `test_terms.py` / `test_archive.py` / `test_media_pause.py` | 单元测试（标准库 unittest） |
-| `docs/` | 设计文档（中文） |
+| `docs/` | 设计文档（中文；`superpowers/` 计划为英文） |
 
 ## 关于模型
 
@@ -176,7 +180,7 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 | **large-v3** | **1550M** | **~10 GB** | **1x** | **最佳** |
 | turbo | 809M | ~6 GB | ~8x | 接近 large |
 
-本项目使用 large-v3 + float16。
+本项目使用 large-v3 + float16（实际显存 ~3.9 GB）。
 
 ## 资源占用
 

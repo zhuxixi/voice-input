@@ -36,7 +36,8 @@ leaves your machine.
 - **On-screen overlay**: red "● REC" while recording, blue "DONE" when finished
 - **GPU accelerated**: faster-whisper large-v3 on CUDA; the model stays resident in
   VRAM, so transcription after key release is nearly instantaneous
-- **Chinese / English / mixed speech**
+- **Chinese & mixed Chinese/English speech** (transcription is pinned to
+  `language="zh"`)
 - **Custom vocabulary (hotwords)**: bias recognition toward your jargon via a simple
   `terms.json`; a broken or missing file degrades gracefully and never blocks
   transcription
@@ -75,10 +76,16 @@ python3 -m venv venv
 
 > **Important — hardcoded paths (for now)**: until #11 lands, the launcher scripts
 > hardcode the original author's absolute install path. After cloning, search for
-> `/home/` in `voice-ptt.sh`, `voice-toggle.sh`, `download-model.sh`, `test-mic.sh`
-> and `voice-ptt.py` (the `VENV=` / `exec` lines) and replace it with the absolute
-> path of your clone. This is tracked in #11 and will become unnecessary once
-> scripts derive their location automatically.
+> `/home/` in the scripts `voice-ptt.sh`, `voice-toggle.sh`, `download-model.sh`,
+> `test-mic.sh` and `voice-ptt.py` (the `VENV=` / `exec` lines) and replace it with
+> the absolute path of your clone. This is tracked in #11 and will become
+> unnecessary once scripts derive their location automatically.
+>
+> **Model snapshot path**: `download-model.sh` unpacks the model into
+> `.../snapshots/downloaded`, but the code loads a specific snapshot-hash directory
+> (`.../snapshots/edaa852e...`). After downloading, reconcile the two — e.g. rename
+> the `downloaded` folder to the hashed name the code expects, or adjust `MODEL_PATH`
+> in `voice-ptt.py` / `test-mic.sh` / `voice-toggle.sh`. (Also to be cleaned up by #11.)
 
 ## Usage
 
@@ -92,6 +99,9 @@ python3 -m venv venv
 # Or in the background
 nohup ./voice-ptt.sh &
 ```
+
+(`test-mic.sh` and `voice-toggle.sh` still record from the author's sound card via
+`-D hw:3`; on other machines change that to `-D default`.)
 
 On startup the model preloads (a few seconds), then you're ready: hold the **right
 Command key** (Mac keyboards) — on PC keyboards this is **right Alt** — speak, and
@@ -182,14 +192,14 @@ Use `arecord -l` only to troubleshoot raw devices, not to pick the capture devic
 | `test-mic.sh` | Microphone test |
 | `download-model.sh` / `download-model.py` | Model download (hf-mirror.com mirror + DoH DNS workaround for polluted DNS) |
 | `test_terms.py` / `test_archive.py` / `test_media_pause.py` | Unit tests (stdlib `unittest`) |
-| `docs/` | Design documents (Chinese) |
+| `docs/` | Design documents (Chinese; the `superpowers/` plans are English) |
 
 ## Model Notes
 
 The model is **OpenAI Whisper large-v3**, converted to
 [CTranslate2](https://github.com/OpenNMT/CTranslate2) format and maintained by
-[Systran](https://github.com/SYSTRAN) (the [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
-project).
+[Systran](https://github.com/SYSTRAN) — a French NLP company founded in 1968 — in the
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) project.
 
 - Trained on 680k hours of labeled audio, multilingual
 - Transformer seq2seq (autoregressive)
@@ -240,7 +250,7 @@ The author's setup, for reference:
   [FunASR](https://github.com/modelscope/FunASR) ct-punc as a post-processing step,
   or SenseVoice-Small (punctuation built in, see below).
 - **SenseVoice-Small upgrade** — [FunAudioLLM/SenseVoice-Small](https://github.com/FunAudioLLM/SenseVoice)
-  is the leading alternative:
+  (DAMO Academy) is the leading alternative:
 
   | | faster-whisper large-v3 (current) | SenseVoice-Small |
   |---|---|---|
