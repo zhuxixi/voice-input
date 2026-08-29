@@ -1,7 +1,7 @@
 # voice-input
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%28X11%29-lightgrey.svg)](#依赖)
 [![CUDA](https://img.shields.io/badge/engine-CUDA%20%2B%20faster--whisper-76b900.svg)](#关于模型)
 
@@ -131,9 +131,9 @@ EOF
 ## 工作原理
 
 1. **按下按键**：记住当前活跃窗口，暂停 MPRIS 媒体，`arecord` 开始录音（16 kHz 单声道）
-2. **松开按键**：停止录音，模型转写（中文，large-v3 float16 CUDA）
+2. **松开按键**：停止录音，恢复被暂停的媒体，模型转写（中文，large-v3 float16 CUDA）
 3. **上屏**：文本写入剪贴板（`xsel`），粘贴回原窗口（`xdotool key ctrl+shift+v`）
-4. **收尾**：归档录音与转写（如开启），恢复媒体播放
+4. **收尾**：归档录音与转写（如开启）
 
 ### 音频采集
 
@@ -158,7 +158,7 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 | `test-mic.sh` | 麦克风测试 |
 | `download-model.sh` / `download-model.py` | 模型下载（hf-mirror.com 镜像 + DoH DNS 修复，绕过 DNS 污染） |
 | `test_terms.py` / `test_archive.py` / `test_media_pause.py` | 单元测试（标准库 unittest） |
-| `docs/` | 设计文档（中文；`superpowers/` 计划为英文） |
+| `docs/` | 设计文档（以中文为主；较新的 `superpowers/` 计划为英文） |
 
 ## 关于模型
 

@@ -1,7 +1,7 @@
 # voice-input
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%28X11%29-lightgrey.svg)](#requirements)
 [![CUDA](https://img.shields.io/badge/engine-CUDA%20%2B%20faster--whisper-76b900.svg)](#model-notes)
 
@@ -158,12 +158,11 @@ All settings with their defaults and how to change them:
 
 1. **Key press** — the active window is remembered, MPRIS media is paused, and
    `arecord` starts recording (16 kHz mono).
-2. **Key release** — recording stops and the model transcribes (Chinese, large-v3
-   float16 on CUDA).
+2. **Key release** — recording stops, paused media playback resumes, and the
+   model transcribes (Chinese, large-v3 float16 on CUDA).
 3. **Typing** — the text goes to the clipboard (`xsel`) and is pasted into the
    remembered window (`xdotool key ctrl+shift+v`).
-4. **Cleanup** — the recording and transcript are archived (if enabled) and media
-   playback resumes.
+4. **Cleanup** — the recording and transcript are archived (if enabled).
 
 ### Audio capture
 
@@ -192,7 +191,7 @@ Use `arecord -l` only to troubleshoot raw devices, not to pick the capture devic
 | `test-mic.sh` | Microphone test |
 | `download-model.sh` / `download-model.py` | Model download (hf-mirror.com mirror + DoH DNS workaround for polluted DNS) |
 | `test_terms.py` / `test_archive.py` / `test_media_pause.py` | Unit tests (stdlib `unittest`) |
-| `docs/` | Design documents (Chinese; the `superpowers/` plans are English) |
+| `docs/` | Design documents (mostly Chinese; the newer `superpowers/` plans are English) |
 
 ## Model Notes
 
