@@ -2,17 +2,41 @@
 """按住右 Command 键录音，松开转写并输入到当前窗口。"""
 
 import os
+import subprocess
 import sys
 
-VENV = "/home/elling/.local/share/voice-input/venv"
+# Derive the repo location from this file (#11): works from any clone path.
+# realpath matches the shell wrappers' readlink -f, so invoking through a
+# symlink (e.g. exposing the script in PATH) still finds the repo.
+_REPO_DIR = os.path.dirname(os.path.realpath(__file__))
+VENV = os.path.join(_REPO_DIR, "venv")
+
+# Ask the venv's own interpreter where its site-packages are (#11): survives
+# in-place venv rebuilds that would leave a stale lib/python3.x dir behind.
+try:
+    _SITE = subprocess.check_output(
+        [
+            os.path.join(VENV, "bin", "python3"),
+            "-c",
+            "import sysconfig; print(sysconfig.get_paths()['purelib'])",
+        ],
+        stderr=subprocess.DEVNULL,
+    ).decode().strip()
+except Exception:
+    _SITE = ""
+if not _SITE or not os.path.isdir(_SITE):
+    sys.stderr.write(
+        f"[voice-input] venv site-packages not found under {VENV} — "
+        "see README Installation\n"
+    )
+    sys.exit(1)
 os.environ["LD_LIBRARY_PATH"] = (
-    f"{VENV}/lib/python3.12/site-packages/nvidia/cublas/lib:"
-    f"{VENV}/lib/python3.12/site-packages/nvidia/cudnn/lib:"
-    f"{VENV}/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib"
+    f"{_SITE}/nvidia/cublas/lib:"
+    f"{_SITE}/nvidia/cudnn/lib:"
+    f"{_SITE}/nvidia/cuda_nvrtc/lib"
     + (f':{os.environ.get("LD_LIBRARY_PATH", "")}')
 )
 
-import subprocess
 import threading
 import time
 import signal
@@ -27,10 +51,26 @@ from gi.repository import Gtk, GLib, Gdk
 from pynput import keyboard
 
 WAVFILE = "/tmp/voice-input-recording.wav"
-MODEL_PATH = os.path.expanduser(
-    "~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3"
-    "/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478"
+SNAPSHOTS_DIR = os.path.expanduser(
+    "~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3/snapshots"
 )
+
+
+def _resolve_model_path():
+    """Pick the first snapshot dir containing model.bin (#11).
+
+    Accepts both the hashed dir (huggingface_hub layout) and the plain
+    `downloaded` dir created by download-model.sh, so a fresh install needs
+    no manual renaming.
+    """
+    if os.path.isdir(SNAPSHOTS_DIR):
+        for name in sorted(os.listdir(SNAPSHOTS_DIR)):
+            cand = os.path.join(SNAPSHOTS_DIR, name)
+            if os.path.isfile(os.path.join(cand, "model.bin")):
+                return cand
+    raise RuntimeError(
+        f"Whisper model not found under {SNAPSHOTS_DIR} — run ./download-model.sh"
+    )
 
 recording = False
 rec_proc = None
@@ -86,7 +126,7 @@ def load_model():
     global model
     if model is None:
         from faster_whisper import WhisperModel
-        model = WhisperModel(MODEL_PATH, device="cuda", compute_type="float16")
+        model = WhisperModel(_resolve_model_path(), device="cuda", compute_type="float16")
     return model
 
 
@@ -238,7 +278,12 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     print("[voice-input] Preloading model...", flush=True)
-    load_model()
+    try:
+        load_model()
+    except RuntimeError as e:
+        # _resolve_model_path 的可行动错误应像 venv 守卫一样干净退出,而非裸 traceback
+        sys.stderr.write(f"[voice-input] {e}\n")
+        sys.exit(1)
     print("[voice-input] Ready! 按住右 Command 键录音，松开转写", flush=True)
     print("[voice-input] Ctrl+C 退出", flush=True)
 

@@ -64,9 +64,7 @@ python3 -m venv venv
 ./download-model.sh
 ```
 
-> **注意（暂存的硬编码路径）**：在 #11 落地之前，启动脚本里硬编码了原作者机器上的绝对路径。克隆后请在以下脚本文件中搜索 `/home/`（`VENV=` / `exec` 相关行），替换为你自己克隆目录的绝对路径：`voice-ptt.sh`、`voice-toggle.sh`、`download-model.sh`、`test-mic.sh`、`voice-ptt.py`。#11 将改为脚本自动推导自身位置，届时无需此步骤。
->
-> **模型快照路径**：`download-model.sh` 会把模型解包到 `.../snapshots/downloaded`，而代码加载的是带哈希的快照目录（`.../snapshots/edaa852e...`）。下载完成后需对齐二者——把 `downloaded` 目录改名为代码期望的哈希目录名，或修改 `voice-ptt.py` / `test-mic.sh` / `voice-toggle.sh` 中的 `MODEL_PATH`。（同样待 #11 一并清理。）
+> 脚本运行时自动推导自身位置——克隆到任意目录即可运行。
 
 ## 使用
 
@@ -80,8 +78,6 @@ python3 -m venv venv
 # 后台运行
 nohup ./voice-ptt.sh &
 ```
-
-（`test-mic.sh` 与 `voice-toggle.sh` 目前仍用作者声卡的 `-D hw:3` 直录；其他机器请改为 `-D default`。）
 
 启动后先预加载模型（几秒），随后按住 **右 Command 键**（Mac 键盘；PC 键盘对应 **右 Alt 键**）说话，松开即转写并输入。
 

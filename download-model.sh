@@ -8,7 +8,9 @@ MODEL=${1:-large-v3}
 REPO="Systran/faster-whisper-${MODEL}"
 MIRROR="https://hf-mirror.com"
 DEST="$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-${MODEL}/snapshots/downloaded"
-VENV="/home/elling/.local/share/voice-input/venv"
+# Derive the repo location from this script (#11): works from any clone path.
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+VENV="$REPO_DIR/venv"
 
 FILES="config.json preprocessor_config.json tokenizer.json vocabulary.json model.bin"
 
@@ -65,16 +67,17 @@ echo ""
 
 # 更新 test-mic.sh 中的模型路径
 echo "验证模型..."
-"$VENV/bin/python3" -c "
+if "$VENV/bin/python3" -c "
 from faster_whisper import WhisperModel
 print('加载模型...')
 model = WhisperModel('$DEST', device='cuda', compute_type='float16')
 print('模型加载成功!')
-" && {
+"; then
     echo ""
     echo "验证通过! 运行测试:"
-    echo "  ~/.local/share/voice-input/test-mic.sh"
-} || {
+    echo "  $REPO_DIR/test-mic.sh"
+else
     echo ""
     echo "模型加载失败，文件可能不完整，请重新运行下载"
-}
+    exit 1
+fi
