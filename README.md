@@ -74,18 +74,7 @@ python3 -m venv venv
 ./download-model.sh
 ```
 
-> **Important — hardcoded paths (for now)**: until #11 lands, the launcher scripts
-> hardcode the original author's absolute install path. After cloning, search for
-> `/home/` in the scripts `voice-ptt.sh`, `voice-toggle.sh`, `download-model.sh`,
-> `test-mic.sh` and `voice-ptt.py` (the `VENV=` / `exec` lines) and replace it with
-> the absolute path of your clone. This is tracked in #11 and will become
-> unnecessary once scripts derive their location automatically.
->
-> **Model snapshot path**: `download-model.sh` unpacks the model into
-> `.../snapshots/downloaded`, but the code loads a specific snapshot-hash directory
-> (`.../snapshots/edaa852e...`). After downloading, reconcile the two — e.g. rename
-> the `downloaded` folder to the hashed name the code expects, or adjust `MODEL_PATH`
-> in `voice-ptt.py` / `test-mic.sh` / `voice-toggle.sh`. (Also to be cleaned up by #11.)
+> Scripts derive their own location at runtime — clone the repo anywhere and run.
 
 ## Usage
 
@@ -99,9 +88,6 @@ python3 -m venv venv
 # Or in the background
 nohup ./voice-ptt.sh &
 ```
-
-(`test-mic.sh` and `voice-toggle.sh` still record from the author's sound card via
-`-D hw:3`; on other machines change that to `-D default`.)
 
 On startup the model preloads (a few seconds), then you're ready: hold the **right
 Command key** (Mac keyboards) — on PC keyboards this is **right Alt** — speak, and

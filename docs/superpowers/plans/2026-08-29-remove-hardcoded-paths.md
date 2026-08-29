@@ -18,9 +18,9 @@ Worktree: `.pi/worktrees/issue-11-remove-hardcoded-paths` (branch `issue-11-remo
 
 ## Task 3 — Docs + READMEs
 
-- sed the audio-archive plan doc (`/home/elling/...` → `~/...`)
+- sed the audio-archive plan doc (author absolute path → `~/...`)
 - Both READMEs: remove Installation callouts + `hw:3` caveat
-- Verify: `rg "/home/elling"` zero hits (tracked files)
+- Verify: zero author-home-path hits in tracked files
 
 ## Task 4 — Behavioral verification
 

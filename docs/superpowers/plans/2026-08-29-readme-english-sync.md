@@ -8,7 +8,7 @@ Full rewrite per spec structure. Verify each factual claim against the contract 
 the spec (env vars, key, paths, file table, commands).
 
 - Files: `README.md` (overwrite)
-- Check: every section present per spec; no `/home/elling` leakage (link #11 instead of
+- Check: every section present per spec; no author-path leakage (link #11 instead of
   embedding the path); language switcher link to `README.zh-CN.md`
 
 ## Task 2 — Write README.zh-CN.md
@@ -17,7 +17,7 @@ Chinese version = old README content + all content fixes (hotwords section, Pipe
 capture, file table, config table, tests, Roadmap, badges, TOC, license link).
 
 - Files: `README.zh-CN.md` (new)
-- Check: structure mirrors English version 1:1; no `/home/elling` leakage
+- Check: structure mirrors English version 1:1; no author-path leakage
 
 ## Task 3 — Fact-check review
 

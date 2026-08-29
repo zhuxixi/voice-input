@@ -1,14 +1,27 @@
 #!/usr/bin/env python3
 """按住右 Command 键录音，松开转写并输入到当前窗口。"""
 
+import glob
 import os
 import sys
 
-VENV = "/home/elling/.local/share/voice-input/venv"
+# Derive the repo location from this file (#11): works from any clone path.
+_REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+VENV = os.path.join(_REPO_DIR, "venv")
+
+# Locate venv site-packages without pinning the python3.x version.
+_SITE_MATCHES = sorted(glob.glob(os.path.join(VENV, "lib", "python3*", "site-packages")))
+if not _SITE_MATCHES:
+    sys.stderr.write(
+        f"[voice-input] venv site-packages not found under {VENV} — "
+        "see README Installation\n"
+    )
+    sys.exit(1)
+_SITE = _SITE_MATCHES[0]
 os.environ["LD_LIBRARY_PATH"] = (
-    f"{VENV}/lib/python3.12/site-packages/nvidia/cublas/lib:"
-    f"{VENV}/lib/python3.12/site-packages/nvidia/cudnn/lib:"
-    f"{VENV}/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib"
+    f"{_SITE}/nvidia/cublas/lib:"
+    f"{_SITE}/nvidia/cudnn/lib:"
+    f"{_SITE}/nvidia/cuda_nvrtc/lib"
     + (f':{os.environ.get("LD_LIBRARY_PATH", "")}')
 )
 
@@ -27,10 +40,26 @@ from gi.repository import Gtk, GLib, Gdk
 from pynput import keyboard
 
 WAVFILE = "/tmp/voice-input-recording.wav"
-MODEL_PATH = os.path.expanduser(
-    "~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3"
-    "/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478"
+SNAPSHOTS_DIR = os.path.expanduser(
+    "~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3/snapshots"
 )
+
+
+def _resolve_model_path():
+    """Pick the first snapshot dir containing model.bin (#11).
+
+    Accepts both the hashed dir (huggingface_hub layout) and the plain
+    `downloaded` dir created by download-model.sh, so a fresh install needs
+    no manual renaming.
+    """
+    if os.path.isdir(SNAPSHOTS_DIR):
+        for name in sorted(os.listdir(SNAPSHOTS_DIR)):
+            cand = os.path.join(SNAPSHOTS_DIR, name)
+            if os.path.isfile(os.path.join(cand, "model.bin")):
+                return cand
+    raise RuntimeError(
+        f"Whisper model not found under {SNAPSHOTS_DIR} — run ./download-model.sh"
+    )
 
 recording = False
 rec_proc = None
@@ -86,7 +115,7 @@ def load_model():
     global model
     if model is None:
         from faster_whisper import WhisperModel
-        model = WhisperModel(MODEL_PATH, device="cuda", compute_type="float16")
+        model = WhisperModel(_resolve_model_path(), device="cuda", compute_type="float16")
     return model
 
 

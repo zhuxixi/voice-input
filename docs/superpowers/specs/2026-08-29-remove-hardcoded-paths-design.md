@@ -2,7 +2,8 @@
 
 ## Goal
 
-No tracked file references the author's machine (`/home/elling`). Every runtime
+No tracked file references the author's machine (home-directory absolute
+paths). Every runtime
 path derives from the script's own location or the user's home. Behavior on the
 author's machine is byte-identical: repo lives at the same path, default audio
 source is the same mic.
@@ -13,7 +14,7 @@ source is the same mic.
 
 | What | Before | After |
 |---|---|---|
-| Repo dir (sh) | literal `/home/elling/.local/share/voice-input` | `REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"` |
+| Repo dir (sh) | literal author-home path | `REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"` |
 | Repo dir (py) | literal in `VENV` | `_REPO_DIR = os.path.dirname(os.path.abspath(__file__))` |
 | venv python | `"$VENV/bin/python3"` (unchanged, venv-relative already) | unchanged |
 | System python | `/usr/bin/python3` in `voice-ptt.sh` exec | **keep** (distro-standard, needed for gi/GTK) |
@@ -32,7 +33,7 @@ get `snapshots/downloaded` from `download-model.sh`, which the code now accepts.
 - `download-model.sh`: REPO_DIR/venv only; final hint prints `$REPO_DIR/test-mic.sh`
 - `voice-ptt.py`: `_REPO_DIR`/`VENV` from `__file__`, glob site-packages for nvidia
   libs, `_resolve_model_path()` raising a clear "run ./download-model.sh" error
-- `docs/superpowers/plans/2026-07-19-audio-archive.md`: `/home/elling/.local/share/voice-input` → `~/.local/share/voice-input`
+- `docs/superpowers/plans/2026-07-19-audio-archive.md`: author absolute path → `~/.local/share/voice-input`
 - `README.md` / `README.zh-CN.md`: drop the two Installation callouts (hardcoded
   paths + model snapshot) and the `hw:3` caveat — all obsolete after this change
 
@@ -43,7 +44,7 @@ get `snapshots/downloaded` from `download-model.sh`, which the code now accepts.
 
 ## Local-machine invariants (must not change)
 
-- Derived `VENV` == `/home/elling/.local/share/voice-input/venv` (same checkout location)
+- Derived `VENV` == the existing checkout's venv (same checkout location)
 - Derived model dir == the existing `edaa852e...` snapshot (contains `model.bin`)
 - `-D default` == the same PD200X mic (PipeWire default source)
 - `/usr/bin/python3` exec unchanged
@@ -56,7 +57,7 @@ get `snapshots/downloaded` from `download-model.sh`, which the code now accepts.
 
 ## Acceptance (from issue #11)
 
-- `rg "/home/elling"` zero hits in tracked files
+- Zero author-home-path hits in tracked files
 - Unit tests pass; `bash -n` clean on all scripts
 - Worktree smoke: `./voice-ptt.sh` reaches "Ready!" (model preloads)
 - Fresh clone to `~/tmp/` derives paths correctly and starts

@@ -8,7 +8,9 @@ MODEL=${1:-large-v3}
 REPO="Systran/faster-whisper-${MODEL}"
 MIRROR="https://hf-mirror.com"
 DEST="$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-${MODEL}/snapshots/downloaded"
-VENV="/home/elling/.local/share/voice-input/venv"
+# Derive the repo location from this script (#11): works from any clone path.
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+VENV="$REPO_DIR/venv"
 
 FILES="config.json preprocessor_config.json tokenizer.json vocabulary.json model.bin"
 
@@ -73,7 +75,7 @@ print('模型加载成功!')
 " && {
     echo ""
     echo "验证通过! 运行测试:"
-    echo "  ~/.local/share/voice-input/test-mic.sh"
+    echo "  $REPO_DIR/test-mic.sh"
 } || {
     echo ""
     echo "模型加载失败，文件可能不完整，请重新运行下载"

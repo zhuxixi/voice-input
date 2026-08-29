@@ -15,7 +15,7 @@
 - **/tmp 录音用完即清**:归档成功 → wav 被 move 走;归档失败/异常 → finally 兜底 `unlink`
 - **所有改动在 worktree**,禁碰 `main`
 - `git add <file>` 按文件 stage,**禁用 `git add -A`**(避免 sweep 临时文件)
-- venv 解释器:`/home/elling/.local/share/voice-input/.claude/worktrees/issue1-archive/venv/bin/python`(worktree 内 venv;若不存在则用主 checkout 的 `~/.local/share/voice-input/venv/bin/python`,见 Task 1 Step 0)
+- venv 解释器:`~/.local/share/voice-input/.claude/worktrees/issue1-archive/venv/bin/python`(worktree 内 venv;若不存在则用主 checkout 的 `~/.local/share/voice-input/venv/bin/python`,见 Task 1 Step 0)
 
 ---
 
@@ -48,7 +48,7 @@
 - [ ] **Step 0: 确认 venv 可用**
 
 ```bash
-cd /home/elling/.local/share/voice-input/.claude/worktrees/issue1-archive
+cd ~/.local/share/voice-input/.claude/worktrees/issue1-archive
 ls venv/bin/python 2>/dev/null && echo "worktree venv ok" || echo "用主 venv: ~/.local/share/voice-input/venv/bin/python"
 ```
 
@@ -273,7 +273,7 @@ Expected: PASS,5 个测试全绿(`test_basic_archive` / `test_index_jsonl_two_re
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/elling/.local/share/voice-input/.claude/worktrees/issue1-archive
+cd ~/.local/share/voice-input/.claude/worktrees/issue1-archive
 git add archive.py test_archive.py
 git commit -m "feat(archive): add recording archive module with jsonl index
 
@@ -397,7 +397,7 @@ Modify `README.md` 的「文件说明」表,加一行:
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /home/elling/.local/share/voice-input/.claude/worktrees/issue1-archive
+cd ~/.local/share/voice-input/.claude/worktrees/issue1-archive
 git add voice-ptt.py README.md
 git commit -m "feat(archive): integrate recording archive into voice-ptt
 
