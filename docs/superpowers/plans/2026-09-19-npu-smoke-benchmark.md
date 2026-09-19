@@ -42,9 +42,9 @@ def run_bench(model_dir: str, device: str, wav: str, runs: int = 3, timeout_s: i
 **Test:** `./venv/bin/python -m unittest test_bench -v`;纯度:子进程 `import bench.npu_bench` 后 `openvino not in sys.modules`
 
 **Steps:**
-- [ ] 按接口实现四个函数;run_bench 内:懒 import openvino_genai、NPU 时 config={"STATIC_PIPELINE": True}、计时(load/first/warm)、signal.alarm 包裹每次 transcribe、文本逐字记录、TIMEOUT 捕获后继续
-- [ ] 单测覆盖:parse_args 默认值与必填、--device 归一化(cpu/CPU→"CPU",npu/NPU→"NPU")、set_npu_library_path 前插且保留旧值、format_report 字段齐全且含 text_first、超时字段
-- [ ] `--help` 无副作用;commit `feat: NPU benchmark script pure layer (#17)`
+- [x] 按接口实现四个函数;run_bench 内:懒 import openvino_genai、NPU 时 config={"STATIC_PIPELINE": True}、计时(load/first/warm)、signal.alarm 包裹每次 transcribe、文本逐字记录、TIMEOUT 捕获后继续
+- [x] 单测覆盖:parse_args 默认值与必填、--device 归一化(cpu/CPU→"CPU",npu/NPU→"NPU")、set_npu_library_path 前插且保留旧值、format_report 字段齐全且含 text_first、超时字段
+- [x] `--help` 无副作用;commit `feat: NPU benchmark script pure layer (#17)`
 
 ### Task 2: 模型下载(A3 前置)
 
@@ -53,8 +53,8 @@ def run_bench(model_dir: str, device: str, wav: str, runs: int = 3, timeout_s: i
 **Test:** 目录存在且含 OpenVINO IR 文件(.xml/.bin 或 GenAI 目录结构)
 
 **Steps:**
-- [ ] `./venv/bin/python -c "from huggingface_hub import snapshot_download; snapshot_download('OpenVINO/whisper-small-int8-ov')"`(直连 hf 实测可用;失败切 HF_ENDPOINT=https://hf-mirror.com)
-- [ ] 记录本地路径与仓库 README 声明的量化配置
+- [x] `./venv/bin/python -c "from huggingface_hub import snapshot_download; snapshot_download('OpenVINO/whisper-small-int8-ov')"`(直连 hf 实测可用;失败切 HF_ENDPOINT=https://hf-mirror.com)
+- [x] 记录本地路径与仓库 README 声明的量化配置
 - [ ] 无 commit(无代码变更)
 
 ### Task 3: CPU 基准(A3)
@@ -100,3 +100,10 @@ def run_bench(model_dir: str, device: str, wav: str, runs: int = 3, timeout_s: i
 ## Acceptance Log
 
 (Task 5 填写)
+
+### Task 2 记录(2026-09-19)
+
+- 直连 huggingface.co 失败(httpx Errno 101 Network is unreachable;昨日 curl 直连可用,今日不稳),按预案切 `HF_ENDPOINT=https://hf-mirror.com` 成功。
+- 本地路径: `~/.cache/huggingface/hub/models--OpenVINO--whisper-small-int8-ov/snapshots/5b831719e093f86e1970be663e524fe001489f9b`
+- 布局: encoder 92MB + decoder 154MB(INT8)+ tokenizer/detokenizer + preprocessor/tokenizer 配置,共 245MB。`openvino_config.json` 声明: optimum 2.1.0 / transformers 4.57.6 / NNCF default int8。
+- **风险记录: 该导出无 `openvino_decoder_with_past_model.*`(KV cache 版 decoder)——openvino.genai#1728 指出 NPU 静态管线需要之;CPU 应不受影响,NPU 若拒绝按 fallback 链走。**

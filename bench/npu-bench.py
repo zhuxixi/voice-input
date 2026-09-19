@@ -102,19 +102,41 @@ def _extract_text(result) -> str:
     return str(result).strip()
 
 
+def _load_wav(path: str):
+    """wav(16kHz mono S16LE) → float32 采样序列(genai generate 的入参形态)。
+
+    numpy 懒导入(纯度契约同 openvino:模块顶层零重依赖)。
+    """
+    import wave
+
+    import numpy as np
+
+    with wave.open(path) as w:
+        if w.getframerate() != 16000 or w.getnchannels() != 1:
+            print(
+                f"[bench] warn: wav 非 16kHz mono(实际 {w.getframerate()}Hz "
+                f"{w.getnchannels()}ch),whisper 内部会重采样,计时含重采样开销",
+                file=sys.stderr,
+            )
+        data = w.readframes(w.getnframes())
+    return np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+
+
 def run_bench(model_dir: str, device: str, wav: str, runs: int = 3,
               timeout_s: int = 120, max_new_tokens: int = None) -> dict:
     """集成路径:真实加载模型并转写,返回 metrics dict(见 format_report 契约)。
 
     本函数是唯一碰 openvino 的地方(懒导入);NPU 走静态管线
     ({"STATIC_PIPELINE": True},官方 NPU 要求),CPU 默认动态。
-    超时的 run 不计入 mean/min/max(时间记 None 则由全超时时的空表处理),
-    any_run_timeout 如实置位。
+    genai 2026.4 的 generate() 入参是原始音频浮点序列(不吃文件路径),
+    language/max_new_tokens 走 kwargs(实测支持)。
+    超时的 run 不计入 mean/min/max,any_run_timeout 如实置位。
     """
     set_npu_library_path(os.environ)  # NPU 枚举前置(本机已验证的坑)
 
     from openvino_genai import WhisperPipeline  # 懒导入(纯度契约)
 
+    samples = _load_wav(wav)
     config = {"STATIC_PIPELINE": True} if device == "NPU" else {}
 
     t0 = time.perf_counter()
@@ -125,11 +147,7 @@ def run_bench(model_dir: str, device: str, wav: str, runs: int = 3,
         kwargs = {"language": "zh"}
         if max_new_tokens is not None:
             kwargs["max_new_tokens"] = max_new_tokens
-        try:
-            return _extract_text(pipe.generate(wav, **kwargs))
-        except TypeError:
-            # 个别 genai 版本不接受 language/max_new_tokens kwarg → 退化为裸调用
-            return _extract_text(pipe.generate(wav))
+        return _extract_text(pipe.generate(samples, **kwargs))
 
     old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
     try:
