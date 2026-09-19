@@ -90,10 +90,10 @@ def build_model(engine: str = None, model: str = None,
 **Test:** `./venv/bin/python -m py_compile voice-ptt.py`;`git diff main --stat -- terms.py archive.py media_pause.py voice-ptt.sh` 为空;全套件 `python3 -m unittest test_terms test_archive test_media_pause test_engine` 绿
 
 **Steps:**
-- [ ] 删 `SNAPSHOTS_DIR` 与 `_resolve_model_path`;`import engine`（与 archive/terms 同区块）
-- [ ] `load_model()` 体 → `engine.build_model()`（global model 缓存与 preload 流程不动）
-- [ ] `main()` 启动错误捕获 `except RuntimeError` 扩为 `except (RuntimeError, ValueError)`（非法 env 干净退出而非裸 traceback）
-- [ ] 其余一切不动（preamble/GUI/转写调用点/归档/媒体暂停）;commit `refactor: voice-ptt uses engine module for model loading (#16)`
+- [x] 删 `SNAPSHOTS_DIR` 与 `_resolve_model_path`;`import engine`（与 archive/terms 同区块）
+- [x] `load_model()` 体 → `engine.build_model()`（global model 缓存与 preload 流程不动）
+- [x] `main()` 启动错误捕获 `except RuntimeError` 扩为 `except (RuntimeError, ValueError)`（非法 env 干净退出而非裸 traceback）
+- [x] 其余一切不动（preamble/GUI/转写调用点/归档/媒体暂停）;commit `refactor: voice-ptt uses engine module for model loading (#16)`
 
 ### Task 4: shell 包装收敛（A7）
 

@@ -43,6 +43,7 @@ import signal
 from archive import archive_recording, ARCHIVE_ENABLED
 from media_pause import pause_playing, resume, PAUSE_MEDIA_ENABLED
 from terms import load_terms, build_prompt, build_transcribe_kwargs
+import engine
 import gi
 
 gi.require_version("Gtk", "3.0")
@@ -51,26 +52,6 @@ from gi.repository import Gtk, GLib, Gdk
 from pynput import keyboard
 
 WAVFILE = "/tmp/voice-input-recording.wav"
-SNAPSHOTS_DIR = os.path.expanduser(
-    "~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3/snapshots"
-)
-
-
-def _resolve_model_path():
-    """Pick the first snapshot dir containing model.bin (#11).
-
-    Accepts both the hashed dir (huggingface_hub layout) and the plain
-    `downloaded` dir created by download-model.sh, so a fresh install needs
-    no manual renaming.
-    """
-    if os.path.isdir(SNAPSHOTS_DIR):
-        for name in sorted(os.listdir(SNAPSHOTS_DIR)):
-            cand = os.path.join(SNAPSHOTS_DIR, name)
-            if os.path.isfile(os.path.join(cand, "model.bin")):
-                return cand
-    raise RuntimeError(
-        f"Whisper model not found under {SNAPSHOTS_DIR} — run ./download-model.sh"
-    )
 
 recording = False
 rec_proc = None
@@ -125,8 +106,9 @@ model = None
 def load_model():
     global model
     if model is None:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(_resolve_model_path(), device="cuda", compute_type="float16")
+        # 引擎/模型选择收敛到 engine.py(#16):cuda 分支构造参数是原 load_model
+        # 原文逐字搬移;VOICE_INPUT_ENGINE/VOICE_INPUT_MODEL 见 engine 模块注释。
+        model = engine.build_model()
     return model
 
 
@@ -280,8 +262,9 @@ def main():
     print("[voice-input] Preloading model...", flush=True)
     try:
         load_model()
-    except RuntimeError as e:
-        # _resolve_model_path 的可行动错误应像 venv 守卫一样干净退出,而非裸 traceback
+    except (RuntimeError, ValueError) as e:
+        # engine 的可行动错误(模型缺失/非法 env 值)应像 venv 守卫一样干净退出,
+        # 而非裸 traceback(#16:engine_name 非法值是 ValueError)
         sys.stderr.write(f"[voice-input] {e}\n")
         sys.exit(1)
     print("[voice-input] Ready! 按住右 Command 键录音，松开转写", flush=True)
