@@ -124,11 +124,11 @@ def _extract_text(result) -> str:
 def _load_wav(path: str):
     """wav(16kHz mono S16LE) → float32 采样序列(genai generate 的入参形态)。
 
-    numpy 懒导入(纯度契约同 openvino:模块顶层零重依赖)。
+    校验全部在 numpy 导入之前完成(zima CR round1 发现 1:拒绝路径
+    不得依赖重依赖,否则无 numpy 机器上单测直接 ModuleNotFoundError,
+    破坏「测试仅标准库」声明);numpy 仅在真正需要转换时才导入。
     """
     import wave
-
-    import numpy as np
 
     with wave.open(path) as w:
         if w.getsampwidth() != 2:
@@ -145,6 +145,9 @@ def _load_wav(path: str):
                 file=sys.stderr,
             )
         data = w.readframes(w.getnframes())
+
+    import numpy as np
+
     return np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
 
 
@@ -288,7 +291,15 @@ def _run_with_watchdog(fn, wall_s: float):
             data += chunk
         os.close(r)
         if not data:
-            return None  # 子进程异常退出且无输出
+            # 区分子进程死因(zima CR round1 建议 2):非看门狗死(如 OOM 被
+            # SIGKILL、段错误)不得误报成 watchdog/deadlock
+            if os.WIFSIGNALED(wait_status):
+                raise RuntimeError(
+                    f"bench child killed by signal {os.WTERMSIG(wait_status)} "
+                    "(OOM?); no metrics returned")
+            raise RuntimeError(
+                f"bench child exited status {os.WEXITSTATUS(wait_status)} "
+                "without output")
         payload = _json.loads(data)
         if "__error__" in payload:
             raise RuntimeError(payload["__error__"])
@@ -296,6 +307,9 @@ def _run_with_watchdog(fn, wall_s: float):
     except _RunTimeout:
         pass
     finally:
+        # 恢复原 handler(zima CR round1 建议 1:不永久污染宿主的 alarm 语义,
+        # 编程式复用 main()/嵌入宿主时尤其重要)
+        signal.signal(signal.SIGALRM, old_handler)
         try:
             os.kill(pid, signal.SIGKILL)
             os.waitpid(pid, 0)
