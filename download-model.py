@@ -78,15 +78,30 @@ def main():
     print()
 
     from faster_whisper import WhisperModel
+    # 构造参数收敛到 engine 单一事实源(#16 CR 发现 4:不再硬编码 device='cuda',
+    # VOICE_INPUT_ENGINE=cpu 的机器也能跑本脚本;auto 先试 cuda 失败降级 cpu)
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    import engine
+    eng = engine.engine_name(dict(os.environ))
+    if eng == "npu":
+        print("NPU engine not implemented yet — see issue #19", file=sys.stderr)
+        sys.exit(1)
+    kwargs = engine.construction_kwargs(eng)
     print("开始下载（首次约 3GB）...")
     print("进度条应该很快出现，如果没有说明网络仍有问题")
     print()
 
-    model_obj = WhisperModel(model, device="cuda", compute_type="float16")
+    try:
+        model_obj = WhisperModel(model, **kwargs)
+    except Exception:
+        if eng != "auto":
+            raise
+        print("  cuda 加载失败,auto 降级 cpu int8 重试...")
+        model_obj = WhisperModel(model, **engine.construction_kwargs("cpu"))
 
     print()
     print(f"模型 {model} 下载完成!")
-    print("运行测试: ~/.local/share/voice-input/test-mic.sh")
+    print("运行测试: ./test-mic.sh")
 
 if __name__ == "__main__":
     main()

@@ -111,7 +111,7 @@ def build_model(engine: str = None, model: str = None,
 **Files:**
 - Modify: `download-model.sh`
 
-**Test:** A8 grep: `curl -f`、`.part`、per-model case、无 `bc`、verify 走 engine;U2 隔离实跑: `HOME=$(mktemp -d) ./download-model.sh small`（真 venv 验证需 VOICE_INPUT_ENGINE=cpu）→ 4 文件落地、无 "Entry not found"、验证步骤过
+**Test:** A8 grep: `curl -f`、`-C -` + HEAD content-length、per-model case、无 `bc`、verify 走 engine;U2 隔离实跑: `HOME=$(mktemp -d) ./download-model.sh small`（真 venv 验证需 VOICE_INPUT_ENGINE=cpu）→ 4 文件落地、无 "Entry not found"、验证步骤过;**重跑应跳过已完整的 model.bin（HEAD 对账）**
 
 **Steps:**
 - [x] `case "$MODEL"` 配清单: large-v3=今日 5 文件;small=`config.json tokenizer.json vocabulary.txt model.bin`;未知 → 报错列出支持名
@@ -160,3 +160,20 @@ def build_model(engine: str = None, model: str = None,
 | U2 | ✅ | 隔离实跑 `HOME=$(mktemp -d) VOICE_INPUT_ENGINE=cpu ./download-model.sh small` → exit 0,恰 4 文件(config.json/tokenizer.json/vocabulary.txt 459861B/model.bin 461MB),无 "Entry not found" body,cpu 验证步骤「模型加载成功」。**发现并修复**:verify 需显式传 `model='$MODEL'`,否则隔离 HOME 下按 env 默认找 large-v3 必失败 |
 
 模块纯度附加验证: 子进程 `import engine` 后 `faster_whisper not in sys.modules`(无 GPU 机器可跑单测的契约)✅
+
+### CR 修正轮(2026-09-19,pi workflow code-review,28 agents)
+
+CR 原始发现 10 条(合并重复后 8 条独立):修复 5(1/2/3/4/6),记录延后 3(5/7/8 → #19/#20)。
+
+| 发现 | 处置 | 修复内容与验证 |
+|------|------|----------------|
+| 1 voice-toggle.sh 预检丢失(CONFIRMED) | ✅ 已修 | 第一次按键分支恢复毫秒级预检(engine_name + resolve_model_path + npu 占位,notify-send 弹可行动错误并拒绝录音);transcribe 调用去掉 `2>/dev/null` 不再吞 stderr。`bash -n` 过 |
+| 2 download-model.sh 断点续传被毁(CONFIRMED) | ✅ 已修 | 弃 `.part`+失败即删方案,改 `-C -` 直写目标文件(跨运行续传保留)+ HEAD Content-Length 完整性对账(已完整的 model.bin 跳过,顺带修复旧代码整包重下 3GB 的存量回归)。U2 重跑:首跑 4 文件干净落地,重跑 model.bin 显示「已完整: 461 MB」跳过 ✅ |
+| 3 test-mic.sh 录音后才报错(CONFIRMED) | ✅ 已修 | 录音提示前加同款毫秒级预检,新装机器不再先说 5 秒话才看到模型缺失错误。`bash -n` 过 |
+| 4 download-model.py 第 4 处硬编码(CONFIRMED,存量漏网) | ✅ 已修 | 构造参数收敛到新增的 `engine.construction_kwargs()`(单一定义点,build_model 与之共用);npu 干净报错;顺带修 #11 之前的过时提示路径。`py_compile` 过 |
+| 5 verify 目标歧义(PLAUSIBLE·低) | 📝 不修 | 验证加载的恰是运行时会加载的目录(sorted-first 同逻辑),相对 main 无用户可见回归;记录于 #19 |
+| 6 engine.py 校验三处重复(CONFIRMED) | ✅ 已修 | 收敛为 `_validated_engine()` 单点 + `construction_kwargs()` 单点;删除不可达的尾部 raise。新增 5 个单测,56 tests OK |
+| 7 DEST 与 snapshots_base 双写(PLAUSIBLE) | 📝 延后 | 当前逐字节一致无现实故障;#19/#20 统一收敛(记录于 #19) |
+| 8 preamble 第 5 份拷贝(PLAUSIBLE) | 📝 延后 | spec 明确接受本次复制;#19 追加 NPU 路径时统一收敛到 engine 可调用函数(记录于 #19) |
+
+修正后回归: 56 tests OK(`test_terms test_archive test_media_pause test_engine`);保护文件仍零 diff;U2 隔离重跑全过(含 skip 逻辑)。

@@ -34,34 +34,48 @@ echo ""
 
 mkdir -p "$DEST"
 
-# 下载文件，支持断点续传。curl -f: HTTP >=400 直接失败,不再把 404 响应体
-# (如 "Entry not found")存成文件伪装成功(#15);下载到 .part,成功后原子改名。
+# 下载文件,支持跨运行断点续传(#16 CR 发现 2:-C - 直写目标文件,
+# 失败保留部分进度,重跑续传——慢速链路下 3GB 的 large-v3 才能下完)。
+# curl -f:HTTP >=400 不写任何字节,镜像 404 响应体(如 "Entry not found")
+# 不再伪装成成功文件(#15);完整性用 HEAD Content-Length 对账,已完整的
+# model.bin 跳过(修复旧代码重跑整包重下 3GB 的回归)。
 download_file() {
     local filename=$1
     local filepath="$DEST/$filename"
+    local url="$MIRROR/$REPO/resolve/main/$filename"
 
     if [ -f "$filepath" ] && [ "$filename" != "model.bin" ]; then
         echo "  [跳过] $filename (已存在)"
         return 0
     fi
 
-    echo -n "  [下载] $filename ... "
-    local url="$MIRROR/$REPO/resolve/main/$filename"
-
-    if curl -fL -# -o "$filepath.part" -C - --max-time 600 "$url"; then
-        mv -f "$filepath.part" "$filepath"
-    else
-        rm -f "$filepath.part"
-        echo "FAILED"
-        return 1
+    # HEAD 对账远端大小:本地已完整(含上次已下完的 model.bin)则跳过;
+    # HEAD 失败(空 expected)则安全降级为直接下载
+    local expected
+    expected=$(curl -fsSLI --max-time 30 "$url" 2>/dev/null | tr -d '\r' \
+        | awk 'tolower($1)=="content-length:"{print $2}' | tail -1 || true)
+    if [ -n "$expected" ] && [ -f "$filepath" ] \
+        && [ "$(stat -c %s "$filepath" 2>/dev/null)" = "$expected" ]; then
+        echo "  [跳过] $filename (已完整: $((expected / 1048576)) MB)"
+        return 0
     fi
 
-    local size
-    size=$(stat -c %s "$filepath")
-    if [ $size -gt 1048576 ]; then
-        echo "OK ($((size / 1048576)) MB)"
+    echo -n "  [下载] $filename ... "
+    if curl -fL -# -o "$filepath" -C - --max-time 600 "$url"; then
+        local size
+        size=$(stat -c %s "$filepath")
+        if [ $size -gt 1048576 ]; then
+            echo "OK ($((size / 1048576)) MB)"
+        else
+            echo "OK (${size} B)"
+        fi
     else
-        echo "OK (${size} B)"
+        if [ -f "$filepath" ] && [ "$(stat -c %s "$filepath" 2>/dev/null)" -gt 0 ]; then
+            echo "FAILED (部分进度已保留,重跑本脚本断点续传)"
+        else
+            echo "FAILED"
+        fi
+        return 1
     fi
 }
 

@@ -36,7 +36,7 @@ NPU paths gated on engine=npu), hotwords/terms behavior change, README rewrite (
 | cuda branch | Verbatim move of the existing constructor line into engine.py | Reviewable as a move, not rewrite |
 | npu value | `NotImplementedError("see #19")` at construction time | Reserve the enum, fail fast, no dead code |
 | Unknown engine value | Fail fast with message listing valid values | Better than silent fallback (debuggability) |
-| download-model.sh validation | `curl -f` + download to `.part` then atomic rename | #15: hf-mirror 404 body ("Entry not found", 15 B) saved as file and reported OK |
+| download-model.sh validation | `curl -f` + HEAD Content-Length 完整性对账 + `-C -` 直写断点续传(失败保留部分进度,重跑续传;已完整的 model.bin 靠 HEAD 对账跳过) | #15: hf-mirror 404 body ("Entry not found", 15 B) saved as file and reported OK; ⚠ CR 发现 2 修正:首版 `.part`+失败即删会摧毁断点续传,慢链路下 3GB large-v3 永远下不完 |
 | download-model.sh file lists | Per-model manifest: large-v3 keeps today's 5 files; small = config.json, tokenizer.json, vocabulary.txt, model.bin | Repos differ per model (#15); unknown model → error listing supported names |
 | download-model.sh verify | Calls `engine.build_model()` (respects VOICE_INPUT_ENGINE, default cuda) | Removes the hardcoded-cuda verify failure on no-CUDA machines |
 | Size display | Bash integer arithmetic (`$((size/1048576))`) | OmniBook has no `bc` |
@@ -87,7 +87,9 @@ block (same 6 lines as voice-ptt.py) so it is standalone.
 
 ### download-model.sh (modified)
 
-- FILES per model (see decisions); `curl -fL -o "$filepath.part"` + `mv` on success.
+- FILES per model (see decisions); `curl -fL -C -` writes directly to the final
+  path (cross-run resume preserved); HEAD Content-Length check skips files that
+  are already complete (incl. model.bin — fixes the old re-download-3GB regression).
 - Verify step: `"$VENV/bin/python3" -c "import sys; sys.path.insert(0, REPO_DIR); import engine; engine.build_model()"`.
 - bc → `$(( ))`.
 
@@ -118,7 +120,7 @@ block (same 6 lines as voice-ptt.py) so it is standalone.
 | A5 | auto fallback | Automated — unit | same | stub factory raises for cuda → warn on stderr + cpu int8 used |
 | A6 | transcribe_once CLI end-to-end (real model) | Automated — integration (local) | `VOICE_INPUT_ENGINE=cpu VOICE_INPUT_MODEL=small ./venv/bin/python transcribe_once.py <spoken wav>` on OmniBook | exit 0, non-empty stdout, plausible Chinese text |
 | A7 | Shell wrappers converged (static) | Automated — static | grep: test-mic.sh/voice-toggle.sh contain no `WhisperModel(` inline, call transcribe_once.py, keep LD_LIBRARY_PATH export | all three greps as expected |
-| A8 | download-model.sh hardening (static) | Automated — static | grep: `curl -f`, `.part` atomic move, per-model lists present, no `bc`, verify via engine | all present |
+| A8 | download-model.sh hardening (static) | Automated — static | grep: `curl -f`, `-C -` + HEAD content-length check, per-model lists present, no `bc`, verify via engine | all present |
 | A9 | Existing suites green + protected files untouched | Automated — unit + static | `python3 -m unittest test_terms test_archive test_media_pause`; `git diff --stat` for terms/archive/media_pause/voice-ptt.sh empty vs main | all pass / empty diff |
 | U1 | 7700K CUDA regression check | User manual | On 7700K: checkout branch, no env vars, `./voice-ptt.sh`, hold-key record+transcribe | Model loads cuda float16; PTT flow works as before. Timing: next physical access to that machine (pending allowed) |
 | U2 | download-model.sh small fresh run | User manual (observed) | Fresh cache dir: `./download-model.sh small` on OmniBook | 4 files land correctly, no "Entry not found" body, verify step passes under cpu |

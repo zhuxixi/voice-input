@@ -16,6 +16,27 @@ export LD_LIBRARY_PATH="$SITE_PACKAGES/nvidia/cublas/lib:$SITE_PACKAGES/nvidia/c
 
 WAV="/tmp/test-mic.wav"
 
+# 录音前快速预检(#16 CR 发现 3):引擎值合法 + 模型已在本地,不加载模型。
+# 重建旧代码「录音前 fail fast」的时序,新装机器不必先说 5 秒话才看到
+# 「模型未下载」的错误,也避免「转写失败」与「未识别到语音」混在同一输出
+PRECHECK_ERR=$("$VENV/bin/python3" -c "
+import os, sys
+sys.path.insert(0, '$REPO_DIR')
+import engine
+try:
+    eng = engine.engine_name(dict(os.environ))
+    if eng == 'npu':
+        raise NotImplementedError('NPU engine not implemented yet - see issue #19')
+    engine.resolve_model_path()
+except (ValueError, RuntimeError, NotImplementedError) as e:
+    print(e)
+    sys.exit(1)
+" 2>&1)
+if [ $? -ne 0 ]; then
+    echo "test-mic.sh: $PRECHECK_ERR" >&2
+    exit 1
+fi
+
 echo "录音 5 秒，请对着麦克风说话..."
 arecord -d 5 -f S16_LE -r 16000 -c 1 -D default "$WAV" -q
 

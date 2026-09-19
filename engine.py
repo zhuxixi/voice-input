@@ -32,18 +32,36 @@ def model_name(env: dict) -> str:
     return env.get(ENV_MODEL, DEFAULT_MODEL)
 
 
-def engine_name(env: dict) -> str:
-    """VOICE_INPUT_ENGINE -> 引擎名,默认 "cuda";非法值 ValueError。
+def _validated_engine(value: str) -> str:
+    """引擎名单点校验:engine_name / build_model / construction_kwargs 共用。
 
     fail fast 且列出全部合法值:静默降级会把「配置坏了」伪装成「变慢了」,难排查。
     """
-    value = env.get(ENV_ENGINE, DEFAULT_ENGINE)
     if value not in VALID_ENGINES:
         raise ValueError(
-            f"[voice-input] unsupported {ENV_ENGINE}={value!r}; "
+            f"[voice-input] unsupported engine {value!r}; "
             f"valid values: {', '.join(VALID_ENGINES)}"
         )
     return value
+
+
+def engine_name(env: dict) -> str:
+    """VOICE_INPUT_ENGINE -> 引擎名,默认 "cuda";非法值 ValueError。"""
+    return _validated_engine(env.get(ENV_ENGINE, DEFAULT_ENGINE))
+
+
+def construction_kwargs(engine: str) -> dict:
+    """引擎名 -> WhisperModel 构造参数(单一定义点,build_model 与 download-model.py 共用)。
+
+    cuda 分支是 HEAD load_model 原文逐字搬移(#16 契约,勿改);auto 的首次尝试
+    与 cuda 同参;npu 尚无 faster-whisper 侧构造参数(#19 实现前 fail fast)。
+    """
+    _validated_engine(engine)
+    if engine in ("cuda", "auto"):  # auto 首次尝试即 cuda 参数(float16)
+        return {"device": "cuda", "compute_type": "float16"}
+    if engine == "cpu":
+        return {"device": "cpu", "compute_type": "int8"}
+    raise NotImplementedError("NPU engine not implemented yet — see issue #19")
 
 
 def snapshots_base(model: str) -> str:
@@ -96,11 +114,8 @@ def build_model(engine: str = None, model: str = None,
     """
     if engine is None:
         engine = engine_name(os.environ)
-    elif engine not in VALID_ENGINES:
-        raise ValueError(
-            f"[voice-input] unsupported engine={engine!r}; "
-            f"valid values: {', '.join(VALID_ENGINES)}"
-        )
+    else:
+        _validated_engine(engine)
     if model is None:
         model = model_name(os.environ)
     if whisper_factory is None:
@@ -115,20 +130,13 @@ def build_model(engine: str = None, model: str = None,
 
     path = resolve_model_path(model)
 
-    if engine == "cuda":
-        return whisper_factory(path, device="cuda", compute_type="float16")
-    if engine == "cpu":
-        return whisper_factory(path, device="cpu", compute_type="int8")
     if engine == "auto":
         try:
-            return whisper_factory(path, device="cuda", compute_type="float16")
+            return whisper_factory(path, **construction_kwargs("cuda"))
         except Exception as e:
             warn(
                 f"[voice-input] {ENV_ENGINE}=auto: cuda load failed ({e}); "
                 "falling back to cpu int8"
             )
-            return whisper_factory(path, device="cpu", compute_type="int8")
-    raise ValueError(  # 兜底:engine 显式传非法值(绕过 engine_name 校验)时
-        f"[voice-input] unsupported engine={engine!r}; "
-        f"valid values: {', '.join(VALID_ENGINES)}"
-    )
+            return whisper_factory(path, **construction_kwargs("cpu"))
+    return whisper_factory(path, **construction_kwargs(engine))

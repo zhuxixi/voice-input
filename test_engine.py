@@ -191,6 +191,36 @@ class TestBuildModelKwargs(unittest.TestCase):
         )
 
 
+class TestConstructionKwargs(unittest.TestCase):
+    """构造参数单一定义点(#16 CR 发现 4/6):download-model.py 与 build_model 共用。"""
+
+    def test_cuda_kwargs_verbatim(self):
+        self.assertEqual(
+            engine.construction_kwargs("cuda"),
+            {"device": "cuda", "compute_type": "float16"},
+        )
+
+    def test_cpu_kwargs(self):
+        self.assertEqual(
+            engine.construction_kwargs("cpu"),
+            {"device": "cpu", "compute_type": "int8"},
+        )
+
+    def test_auto_first_attempt_is_cuda(self):
+        self.assertEqual(
+            engine.construction_kwargs("auto"), engine.construction_kwargs("cuda")
+        )
+
+    def test_npu_raises_not_implemented(self):
+        with self.assertRaises(NotImplementedError) as ctx:
+            engine.construction_kwargs("npu")
+        self.assertIn("#19", str(ctx.exception))
+
+    def test_invalid_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            engine.construction_kwargs("tpu")
+
+
 class TestAutoFallback(unittest.TestCase):
     """A5 auto 降级:cuda 失败 → warn + cpu int8(仅显式选用)。"""
 
