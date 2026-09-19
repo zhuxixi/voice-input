@@ -61,14 +61,14 @@ def build_model(engine: str = None, model: str = None,
 **Test:** `./venv/bin/python -m unittest test_engine -v`
 
 **Steps:**
-- [ ] 按上述接口实现 `engine.py`（四个函数 + 常量;模块级零副作用、零 faster_whisper import）
-- [ ] `test_engine.py` 覆盖:
+- [x] 按上述接口实现 `engine.py`（四个函数 + 常量;模块级零副作用、零 faster_whisper import）
+- [x] `test_engine.py` 覆盖:
   - A1 默认契约: `engine_name({})`=="cuda"、`model_name({})`=="large-v3"、默认 base 目录名 == `models--Systran--faster-whisper-large-v3/snapshots`（与 HEAD 常量字符串逐字比对）
   - A2 路径泛化: tmpdir 造 large-v3/small 两种快照布局 → 正确目录;无 model.bin → RuntimeError 且信息含 `download-model.sh` 与模型名
   - A3 校验: 未知 engine → ValueError 信息列出四个合法值;`npu` → NotImplementedError
   - A4 构造契约: 注入 stub factory,断言 cuda→`(path, device="cuda", compute_type="float16")`、cpu→`(path, device="cpu", compute_type="int8")`
   - A5 auto 降级: stub factory 对 cuda 抛 Exception → warn 被调用、cpu int8 被构造
-- [ ] 单测全绿;`git add engine.py test_engine.py && git commit -m "feat: engine module with VOICE_INPUT_ENGINE/MODEL selection (#16)"`
+- [x] 单测全绿;`git add engine.py test_engine.py && git commit -m "feat: engine module with VOICE_INPUT_ENGINE/MODEL selection (#16)"`
 
 ### Task 2: `transcribe_once.py` CLI（A6）
 
