@@ -124,9 +124,9 @@ def build_model(engine: str = None, model: str = None,
 **Test:** 全套件绿;`git diff main --stat` 仅含预期 7 文件;保护文件零 diff;A1–A8 结果汇总;U1 标 pending
 
 **Steps:**
-- [ ] `./venv/bin/python -m unittest test_terms test_archive test_media_pause test_engine -v` 全绿
-- [ ] `git diff main --stat` 逐文件核对;`git diff main -- terms.py archive.py media_pause.py voice-ptt.sh` 空
-- [ ] 验收矩阵逐项对账（A1–A8 实际命令与结果、U1 pending、U2 已跑）写入本文件末尾 "Acceptance Log";commit `test: acceptance log for #16`
+- [x] `./venv/bin/python -m unittest test_terms test_archive test_media_pause test_engine -v` 全绿
+- [x] `git diff main --stat` 逐文件核对;`git diff main -- terms.py archive.py media_pause.py voice-ptt.sh` 空
+- [x] 验收矩阵逐项对账（A1–A8 实际命令与结果、U1 pending、U2 已跑）写入本文件末尾 "Acceptance Log";commit `test: acceptance log for #16`
 
 ---
 
@@ -143,4 +143,20 @@ def build_model(engine: str = None, model: str = None,
 
 ## Acceptance Log
 
-（Task 6 填写）
+执行环境: OmniBook worktree `issue-16-engine-selectable-cpu-cuda`,CPython 3.12.14,faster-whisper 1.2.1。
+
+| ID | 结果 | 实际命令与输出摘要 |
+|----|------|--------------------|
+| A1 | ✅ | `./venv/bin/python -m unittest test_engine -v` 19 tests OK;默认契约:engine_name({})=="cuda"、model_name({})=="large-v3"、snapshots_base("large-v3") 与 HEAD 常量逐字相等 |
+| A2 | ✅ | tmpdir 布局:downloaded/哈希目录均能命中;无 model.bin → RuntimeError 含 "download-model.sh" 与模型名 |
+| A3 | ✅ | 未知值 "gpu" → ValueError 列出全部四值;npu → NotImplementedError 含 "#19" |
+| A4 | ✅ | stub 工厂断言:cuda→(path, device="cuda", compute_type="float16")(逐字契约)、cpu→(path, device="cpu", compute_type="int8") |
+| A5 | ✅ | cuda 抛错 → warn 恰一次(含 auto/cuda 字样)→ cpu int8 构造成功;cuda 成功时零降级零告警 |
+| A6 | ✅(管线级) | `VOICE_INPUT_ENGINE=cpu VOICE_INPUT_MODEL=small ./venv/bin/python transcribe_once.py /tmp/a16-ambient.wav` → exit 0,非空输出「字幕by索兰娅」(无人声噪声的经典幻觉,预期);错误路径:缺失 wav → exit 1 + stderr;非法 engine → exit 1 + 列合法值。**真人说话验证 pending 用户**(spec 允许) |
+| A7 | ✅ | `bash -n` 两脚本过;grep:两脚本内嵌 `WhisperModel(` 计数 0、均含 transcribe_once.py 引用、均保留 `export LD_LIBRARY_PATH`;voice-toggle.sh 保留 `xdotool type` |
+| A8 | ✅ | grep: `curl -fL`(L51)、`.part` 原子改名(L51-54)、`case "$MODEL"` per-model 清单(L18)、bc 引用 0、verify 走 `import engine`(L88)。行为验证:small 仓库缺失的 preprocessor_config.json → curl exit 22、零残留文件(旧版会存 15B 404 body 伪装成功);未知模型 medium → 报错 exit 1 |
+| A9 | ✅ | 全套 51 tests OK;`git diff main --stat` 仅含预期 7 个代码/文档文件;`git diff main -- terms.py archive.py media_pause.py voice-ptt.sh` 为空;voice-ptt.py 的转写调用点与 LD_LIBRARY_PATH preamble 零改动(diff 逐行核对) |
+| U1 | ⏳ pending | 需在 7700K(CUDA)机器实跑:无 env 启动 ./voice-ptt.sh → cuda float16 large-v3 预加载 + 按住转写知常。下次物理接触该机器时执行 |
+| U2 | ✅ | 隔离实跑 `HOME=$(mktemp -d) VOICE_INPUT_ENGINE=cpu ./download-model.sh small` → exit 0,恰 4 文件(config.json/tokenizer.json/vocabulary.txt 459861B/model.bin 461MB),无 "Entry not found" body,cpu 验证步骤「模型加载成功」。**发现并修复**:verify 需显式传 `model='$MODEL'`,否则隔离 HOME 下按 env 默认找 large-v3 必失败 |
+
+模块纯度附加验证: 子进程 `import engine` 后 `faster_whisper not in sys.modules`(无 GPU 机器可跑单测的契约)✅
