@@ -103,8 +103,8 @@ def build_model(engine: str = None, model: str = None,
 **Test:** `bash -n` 两脚本通过;grep 断言: 无内嵌 `WhisperModel(`、含 `transcribe_once.py`、保留 `LD_LIBRARY_PATH` export
 
 **Steps:**
-- [ ] 两脚本删快照目录循环 + 内嵌 python 片段 → `TEXT=$("$VENV/bin/python3" "$REPO_DIR/transcribe_once.py" "$WAV")`(test-mic 保留原打印措辞;toggle 保留 xdotool type 与 notify-send——那是 #18 范围)
-- [ ] commit `refactor: test-mic/voice-toggle use transcribe_once entry (#16)`
+- [x] 两脚本删快照目录循环 + 内嵌 python 片段 → `TEXT=$("$VENV/bin/python3" "$REPO_DIR/transcribe_once.py" "$WAV")`(test-mic 保留原打印措辞;toggle 保留 xdotool type 与 notify-send——那是 #18 范围)
+- [x] commit `refactor: test-mic/voice-toggle use transcribe_once entry (#16)`
 
 ### Task 5: `download-model.sh` 加固（A8 + U2）
 

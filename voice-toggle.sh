@@ -17,18 +17,6 @@ export LD_LIBRARY_PATH="$SITE_PACKAGES/nvidia/cublas/lib:$SITE_PACKAGES/nvidia/c
 PIDFILE="/tmp/voice-input-recording.pid"
 WAVFILE="/tmp/voice-input-recording.wav"
 
-# Pick the first snapshot dir containing model.bin (#11).
-SNAPSHOTS="$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3/snapshots"
-MODEL_PATH=""
-for d in "$SNAPSHOTS"/*/; do
-    [ -f "${d}model.bin" ] && MODEL_PATH="${d%/}" && break
-done
-if [ -z "$MODEL_PATH" ]; then
-    echo "model not found under $SNAPSHOTS — run ./download-model.sh first" >&2
-    notify-send -t 2000 "Voice Input" "模型未找到，请先运行 ./download-model.sh"
-    exit 1
-fi
-
 if [ -f "$PIDFILE" ]; then
     # 第二次按：停止录音 → 转写 → 打字
     PID=$(cat "$PIDFILE")
@@ -41,13 +29,10 @@ if [ -f "$PIDFILE" ]; then
 
     notify-send -t 500 "Voice Input" "转写中..."
 
-    TEXT=$("$VENV/bin/python3" -c "
-from faster_whisper import WhisperModel
-model = WhisperModel('$MODEL_PATH', device='cuda', compute_type='float16')
-segments, info = model.transcribe('$WAVFILE', language='zh')
-text = ''.join(s.text for s in segments).strip()
-print(text)
-" 2>/dev/null)
+    # 转写走 transcribe_once 入口(#16):引擎/模型经 VOICE_INPUT_ENGINE /
+    # VOICE_INPUT_MODEL 选择,不再内嵌 CUDA 调用(默认 cuda,与历史行为一致);
+    # 模型缺失/加载失败时非零退出、TEXT 为空,落入「未识别到语音」分支
+    TEXT=$("$VENV/bin/python3" "$REPO_DIR/transcribe_once.py" "$WAVFILE" 2>/dev/null)
 
     rm -f "$WAVFILE"
 

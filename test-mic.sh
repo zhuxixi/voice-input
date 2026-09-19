@@ -16,19 +16,6 @@ export LD_LIBRARY_PATH="$SITE_PACKAGES/nvidia/cublas/lib:$SITE_PACKAGES/nvidia/c
 
 WAV="/tmp/test-mic.wav"
 
-# Pick the first snapshot dir containing model.bin (#11): accepts both the
-# hashed dir (huggingface_hub layout) and the plain `downloaded` dir from
-# download-model.sh, so a fresh install needs no manual renaming.
-SNAPSHOTS="$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3/snapshots"
-MODEL_PATH=""
-for d in "$SNAPSHOTS"/*/; do
-    [ -f "${d}model.bin" ] && MODEL_PATH="${d%/}" && break
-done
-if [ -z "$MODEL_PATH" ]; then
-    echo "model not found under $SNAPSHOTS — run ./download-model.sh first" >&2
-    exit 1
-fi
-
 echo "录音 5 秒，请对着麦克风说话..."
 arecord -d 5 -f S16_LE -r 16000 -c 1 -D default "$WAV" -q
 
@@ -37,15 +24,17 @@ if [ ! -f "$WAV" ]; then
     exit 1
 fi
 
+# 转写走 transcribe_once 入口(#16):引擎/模型经 VOICE_INPUT_ENGINE /
+# VOICE_INPUT_MODEL 选择,不再内嵌 CUDA 调用(默认 cuda,与历史行为一致)
 echo "转写中..."
-"$VENV/bin/python3" -c "
-from faster_whisper import WhisperModel
-model = WhisperModel('$MODEL_PATH', device='cuda', compute_type='float16')
-segments, info = model.transcribe('$WAV', language='zh')
-text = ''.join(s.text for s in segments).strip()
-print()
-print('识别结果:')
-print(text)
-"
+TEXT=$("$VENV/bin/python3" "$REPO_DIR/transcribe_once.py" "$WAV")
 
 rm -f "$WAV"
+
+if [ -n "$TEXT" ]; then
+    echo
+    echo "识别结果:"
+    echo "$TEXT"
+else
+    echo "未识别到语音"
+fi
