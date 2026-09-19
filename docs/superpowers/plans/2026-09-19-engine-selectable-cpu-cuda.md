@@ -114,10 +114,10 @@ def build_model(engine: str = None, model: str = None,
 **Test:** A8 grep: `curl -f`、`.part`、per-model case、无 `bc`、verify 走 engine;U2 隔离实跑: `HOME=$(mktemp -d) ./download-model.sh small`（真 venv 验证需 VOICE_INPUT_ENGINE=cpu）→ 4 文件落地、无 "Entry not found"、验证步骤过
 
 **Steps:**
-- [ ] `case "$MODEL"` 配清单: large-v3=今日 5 文件;small=`config.json tokenizer.json vocabulary.txt model.bin`;未知 → 报错列出支持名
-- [ ] `download_file`: `curl -fL ... -o "$filepath.part"` 成功才 `mv`;失败 rm .part 并 FAILED
-- [ ] 大小显示 `$((size/1048576))` MB;verify 改 `"$VENV/bin/python3" -c "import sys; sys.path.insert(0, '$REPO_DIR'); import engine; engine.build_model(); print('model load OK')"`
-- [ ] U2 隔离实跑（mktemp HOME,不碰真实缓存）;commit `fix: download-model validates HTTP status, per-model file lists (#16)`
+- [x] `case "$MODEL"` 配清单: large-v3=今日 5 文件;small=`config.json tokenizer.json vocabulary.txt model.bin`;未知 → 报错列出支持名
+- [x] `download_file`: `curl -fL ... -o "$filepath.part"` 成功才 `mv`;失败 rm .part 并 FAILED
+- [x] 大小显示 `$((size/1048576))` MB;verify 改 `"$VENV/bin/python3" -c "import sys; sys.path.insert(0, '$REPO_DIR'); import engine; engine.build_model(model='$MODEL'); print('model load OK')"`（U2 实跑发现:验证必须显式传本次下载的模型名,否则隔离 HOME 下按 env 默认找 large-v3 必失败）
+- [x] U2 隔离实跑（mktemp HOME,不碰真实缓存）;commit `fix: download-model validates HTTP status, per-model file lists (#16)`
 
 ### Task 6: 回归 + 验收对账（A9 全量）
 
