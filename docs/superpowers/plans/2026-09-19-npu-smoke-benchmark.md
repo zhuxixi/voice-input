@@ -62,7 +62,7 @@ def run_bench(model_dir: str, device: str, wav: str, runs: int = 3, timeout_s: i
 **Test:** `./venv/bin/python bench/npu-bench.py --model-dir <下载路径> --device CPU --wav /tmp/a6-trimmed.wav --runs 3` → exit 0,metrics 完整
 
 **Steps:**
-- [ ] 跑通并保存原始输出到 `bench/results-2026-09-19-cpu.txt`(此文件进 git,作为数据留档)
+- [x] 跑通并保存原始输出到 `bench/results-2026-09-19-cpu.txt`(此文件进 git,作为数据留档)
 - [ ] 若 /tmp/a6-trimmed.wav 不存在:通知父级(需用户说话录音),不得用静音文件凑数
 - [ ] commit `test: CPU baseline results for whisper-small int8 ov (#17)`
 
@@ -107,3 +107,33 @@ def run_bench(model_dir: str, device: str, wav: str, runs: int = 3, timeout_s: i
 - 本地路径: `~/.cache/huggingface/hub/models--OpenVINO--whisper-small-int8-ov/snapshots/5b831719e093f86e1970be663e524fe001489f9b`
 - 布局: encoder 92MB + decoder 154MB(INT8)+ tokenizer/detokenizer + preprocessor/tokenizer 配置,共 245MB。`openvino_config.json` 声明: optimum 2.1.0 / transformers 4.57.6 / NNCF default int8。
 - **风险记录: 该导出无 `openvino_decoder_with_past_model.*`(KV cache 版 decoder)——openvino.genai#1728 指出 NPU 静态管线需要之;CPU 应不受影响,NPU 若拒绝按 fallback 链走。**
+
+### Task 4/5 记录(2026-09-19,NPU 被驱动版本阻断——如实记录)
+
+- 枚举复核过(带 env 出 NPU);设备属性可读(AI Boost / 33GB / driver 2026-04)。
+- pip wheel 缺 NPU 编译器三件套 → 从官方 ubuntu22 同 build 归档提取注入 venv(可复现,见 results 文件)。
+- 平台名实证: Lunar Lake = **NPU4000**(驱动 v1.38 固件标 NPU40xx;NPU5010/5020 也合法但非本机)。
+- 正确平台名下**编译成功、执行失败**("No available devices",ze 图导入层),OV 2026.3/2026.4 两代一致
+  → 判定: 驱动 1.32.1(2026-04)过旧,升级到 v1.38.0(2026-09-10,官方 LNL 验证)是解锁项。
+- 模型 fallback 未启动: identity 模型同败,失败与模型无关。
+- CPU 复核(2026.4 恢复后): mean 1.747s,与首测 1.768s 一致。
+
+## Acceptance Log
+
+| ID | 结果 | 证据 |
+|----|------|------|
+| A1 | ✅ | bench 上下文复核: 带 LD_LIBRARY_PATH=['CPU','NPU'],不带=['CPU'](results-npu.txt 头部) |
+| A2 | ✅ | `test_bench` 14 tests OK(含纯度: 模块加载不拉 openvino;--help/缺 wav 退出码) |
+| A3 | ✅ | 模型经 hf-mirror 下载(直连 Errno 101);CPU 管线过: load 1.53s / first 1.98s / warm mean 1.75s,文本非空(results-cpu.txt) |
+| A4 | ⚠️ 如实记录为"被阻断" | NPU 执行 8 种组合全部失败于 ze 图导入层(编译 OK),证据链与判定见 results-npu.txt;按 spec 失败路径规则,这是有效产出(blocker finding) |
+| A5 | ✅(单侧+阻断侧) | CPU 数字齐全;NPU 侧为完整失败矩阵;汇总表见下 |
+| U1 | pending | NPU 无转写文本可比对(被 A4 阻断);CPU 文本: "今天测试语音输入引擎重构HoloWord这个是CPU引擎的验收"(参考 #16 A6 质量线) |
+| U2 | pending | 用户决策: 建议路径 = 升级驱动 v1.38.0 后重试(需 sudo+模块重载/重启,系统级变更待确认) |
+
+## CPU vs NPU 汇总(8.05s 中文语音输入)
+
+| 引擎/设备 | 模型 | 加载 | 首转 | 热跑均值 | 文本 |
+|---|---|---|---|---|---|
+| faster-whisper CPU int8 (#16 A6 参考) | Systran small | ~0(预载) | 3.4s(单次总) | — | 今天测试语音输入引擎重购,Hello World,这个是CPU引擎的验收。 |
+| ov-genai CPU (#17) | OpenVINO small-int8-ov | 1.53s | 1.98s | **1.75s** | 今天测试语音输入引擎重构HoloWord这个是CPU引擎的验收 |
+| ov-genai NPU (#17) | 同上 | — | — | **被驱动阻断** | — |
