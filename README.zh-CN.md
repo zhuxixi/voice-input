@@ -153,7 +153,8 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 | `voice-toggle.sh` | 切换模式脚本（按一下开始，再按一下停止并输入） |
 | `test-mic.sh` | 麦克风测试 |
 | `download-model.sh` / `download-model.py` | 模型下载（hf-mirror.com 镜像 + DoH DNS 修复，绕过 DNS 污染） |
-| `test_terms.py` / `test_archive.py` / `test_media_pause.py` | 单元测试（标准库 unittest） |
+| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` | 单元测试（标准库 unittest） |
+| `bench/` | NPU/CPU 转写基准工具与结果留档（`npu-bench.py`，#17） |
 | `docs/` | 设计文档（以中文为主；较新的 `superpowers/` 计划为英文） |
 
 ## 关于模型
@@ -222,7 +223,7 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 ## 测试
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench -v
 ```
 
 测试仅用标准库，不依赖 GPU。

@@ -1,0 +1,10 @@
+# NPU/CPU 转写基准 —— CPU 结果(#17 Task 3)
+# date: 2026-09-19 | model: OpenVINO/whisper-small-int8-ov (245MB, NNCF default int8)
+# input: /tmp/a6-trimmed.wav (8.05s zh 真人语音,#16 A6 同源) | genai 2026.4.0.0
+# cmd: ./venv/bin/python bench/npu-bench.py --model-dir <snapshots> --device CPU --wav ... --runs 3
+
+device=CPU model_dir=/home/elling/.cache/huggingface/hub/models--OpenVINO--whisper-small-int8-ov/snapshots/5b831719e093f86e1970be663e524fe001489f9b wav=/tmp/a6-trimmed.wav
+model_load_s=1.425 first_transcribe_s=1.936
+warm_runs=3 mean_s=1.768 min_s=1.755 max_s=1.777
+text_first=今天测试语音输入引擎重构HoloWord这个是CPU引擎的验收
+any_run_timeout=false
