@@ -176,7 +176,8 @@ Use `arecord -l` only to troubleshoot raw devices, not to pick the capture devic
 | `voice-toggle.sh` | Alternative toggle mode: press once to start, press again to stop and type |
 | `test-mic.sh` | Microphone test |
 | `download-model.sh` / `download-model.py` | Model download (hf-mirror.com mirror + DoH DNS workaround for polluted DNS) |
-| `test_terms.py` / `test_archive.py` / `test_media_pause.py` | Unit tests (stdlib `unittest`) |
+| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` | Unit tests (stdlib `unittest`) |
+| `bench/` | NPU/CPU transcription benchmark tool + archived results (`npu-bench.py`, #17) |
 | `docs/` | Design documents (mostly Chinese; the newer `superpowers/` plans are English) |
 
 ## Model Notes
@@ -253,7 +254,7 @@ The author's setup, for reference:
 ## Testing
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench -v
 ```
 
 The tests use only the standard library and don't touch the GPU.

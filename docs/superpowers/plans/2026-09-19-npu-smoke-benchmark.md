@@ -145,3 +145,18 @@ def run_bench(model_dir: str, device: str, wav: str, runs: int = 3, timeout_s: i
 - A1 ✅(重验,含 re-exec 机制)/ A2 ✅ 18 tests / A3 ✅ CPU 1.74s / A4 ✅ **NPU 0.29s** / A5 ✅ 表见 results 文件
 - 新增脚本能力: --npu-platform(驱动仍不报平台)、needs_reexec_for_npu(进程内改 env 对 ld.so 无效的兜底)
 - U1: NPU 文本与 CPU 逐字一致(待用户确认即闭环) / U2: 数据强烈支持 #19 GO(待用户拍板)
+
+### 本地 CR 修正轮(pi workflow code-review,30 agents,2026-09-19 22:27)
+
+10 条 CONFIRMED:修 9(1/2/3/4/5/6/7/8/9),延后 1(10,同 #19 已挂的收敛债)。
+
+| # | 发现 | 处置 |
+|---|------|------|
+| 1 | SIGALRM 打不断阻塞中的 C++ generate(),--timeout-s 防挂承诺不成立;且超时后伪造 first_transcribe_s、丢弃迟到结果 | ✅ 重设计:alarm 只置标志(结果/耗时永远真实,超预算如实标记);真死锁由 main() 的 fork 看门狗 SIGKILL 兑底(fork 在 openvino 导入前,无 NPU fork 风险;父进程 alarm 处理器抛异常打断 waitpid——PEP 475 会重试 no-op 打断的调用)。双端实测过(CPU 1.77s / NPU 0.30s,静态编译在子进程内完成) |
+| 2+9 | startswith 与 split(':') 谓词发散,兄弟目录致 re-exec 空转 | ✅ 收敛为共享谓词 _lib_dir_present(分量精确匹配),两处共用;新增回归测试 |
+| 3 | re-exec 用宿主 sys.argv,编程调用会 exec 无关工具 | ✅ reexec_command(argv, script_path) 纯函数,显式传参;新增单测 |
+| 4 | _load_wav 漏检采样宽度,24-bit 被静默误读成垃圾数据 | ✅ getsampwidth() != 2 硬拒绝(ValueError→exit 3);新增单测(造 24-bit wav 断言拒绝) |
+| 5-8 | README 双语:测试命令漏 test_bench、文件表缺 bench/ 条目 | ✅ 两文件四处补齐 |
+| 10 | prepend 库路径模式第 6 份拷贝,已漂移 | 📝 延后 #19(engine.py 收敛,与 #16 CR 发现 8 同主题) |
+
+修正后:22 bench tests + 全套件绿;CPU/NPU 双端经看门狗路径实跑一致。

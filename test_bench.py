@@ -172,5 +172,44 @@ class TestNeedsReexec(unittest.TestCase):
         self.assertFalse(bench.needs_reexec_for_npu({"_NPU_BENCH_REEXEC": "1"}))
 
 
+
+class TestCrRound1Fixes(unittest.TestCase):
+    """CR round-1 修复的回归测试(发现 2/3/4/9)。"""
+
+    def test_lib_dir_predicate_sibling_prefix_not_matched(self):
+        # 发现 2/9:兄弟目录 /usr/lib/x86_64-linux-gnu-extras 不能算已包含
+        sibling = bench.NPU_LIB_DIR + "-extras"
+        env = {"LD_LIBRARY_PATH": sibling}
+        self.assertTrue(bench.needs_reexec_for_npu(env))   # 缺 → 需 re-exec
+        bench.set_npu_library_path(env)                     # 前插真正目录
+        self.assertIn(bench.NPU_LIB_DIR, env["LD_LIBRARY_PATH"].split(":"))
+
+    def test_set_and_needs_agree_after_prefix_case(self):
+        env = {"LD_LIBRARY_PATH": bench.NPU_LIB_DIR + "-extras:/usr/lib"}
+        bench.set_npu_library_path(env)
+        self.assertFalse(bench.needs_reexec_for_npu(env))   # 修后两者一致
+
+    def test_reexec_command_uses_explicit_argv_and_script(self):
+        # 发现 3:编程调用 main([...]) 时不得用宿主 sys.argv
+        cmd = bench.reexec_command(["--device", "npu"], "/abs/bench.py")
+        self.assertEqual(cmd[0], sys.executable)
+        self.assertEqual(cmd[1], "/abs/bench.py")
+        self.assertEqual(cmd[2:], ["--device", "npu"])
+
+    def test_load_wav_rejects_non_int16_width(self):
+        # 发现 4:24-bit PCM 必须硬拒绝(否则垃圾样本 exit 0 被归档)
+        import struct
+        import tempfile
+        import wave as wavemod
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "w24.wav")
+            w = wavemod.open(p, "wb")
+            w.setnchannels(1); w.setsampwidth(3); w.setframerate(16000)
+            w.writeframes(b"\x00\x01\x02" * 100)  # 100 帧 24-bit
+            w.close()
+            with self.assertRaises(ValueError):
+                bench._load_wav(p)
+
+
 if __name__ == "__main__":
     unittest.main()
