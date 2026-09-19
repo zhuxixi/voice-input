@@ -78,9 +78,9 @@ def build_model(engine: str = None, model: str = None,
 **Test:** 录一段真实说话 wav → `VOICE_INPUT_ENGINE=cpu VOICE_INPUT_MODEL=small ./venv/bin/python transcribe_once.py <wav>` → exit 0、stdout 非空中文
 
 **Steps:**
-- [ ] 头部 preamble 与 voice-ptt.py 同源（_REPO_DIR/venv/_SITE/LD_LIBRARY_PATH 六行块）
-- [ ] `main()`: argv[1]=wav;`engine.build_model()` + `transcribe(wav, language="zh")`;join/strip 同 voice-ptt.py;print(text);异常 → stderr + exit 1
-- [ ] 实测（OmniBook,需用户配合说一句话,或用 #15 归档外的临时录音）;`git commit -m "feat: transcribe_once CLI entry point (#16)"`
+- [x] 头部 preamble 与 voice-ptt.py 同源（_REPO_DIR/venv/_SITE/LD_LIBRARY_PATH 六行块）
+- [x] `main()`: argv[1]=wav;`engine.build_model()` + `transcribe(wav, language="zh")`;join/strip 同 voice-ptt.py;print(text);异常 → stderr + exit 1
+- [x] 实测（OmniBook,需用户配合说一句话,或用 #15 归档外的临时录音）;`git commit -m "feat: transcribe_once CLI entry point (#16)"`
 
 ### Task 3: `voice-ptt.py` 接入 engine（A9 前半）
 
