@@ -45,6 +45,10 @@ def parse_args(argv: list) -> argparse.Namespace:
         "--max-new-tokens", type=int, default=None,
         help="限制生成长度(诊断用,默认不限)",
     )
+    p.add_argument(
+        "--npu-platform", default=None,
+        help="NPU 平台名(如 NPU4000=Lunar Lake);驱动不自动上报时需显式指定",
+    )
     ns = p.parse_args(argv)
     dev = ns.device.strip().upper()
     if dev not in ("CPU", "NPU"):
@@ -122,8 +126,21 @@ def _load_wav(path: str):
     return np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
 
 
+def needs_reexec_for_npu(env: dict) -> bool:
+    """True 当 env 缺 NPU 库路径且未带 reexec 哨兵(纯函数,单测覆盖)。
+
+    背景:A/B 实测(2026-09-19)进程内改 os.environ['LD_LIBRARY_PATH'] 对 ld.so 无效
+    (动态链接器只在进程启动读一次)——NPU 枚举要求启动时已含驱动库目录,
+    缺失时由 main() 带正确 env 重新 exec 自身一次。
+    """
+    if env.get("_NPU_BENCH_REEXEC"):
+        return False
+    return NPU_LIB_DIR not in env.get("LD_LIBRARY_PATH", "").split(":")
+
+
 def run_bench(model_dir: str, device: str, wav: str, runs: int = 3,
-              timeout_s: int = 120, max_new_tokens: int = None) -> dict:
+              timeout_s: int = 120, max_new_tokens: int = None,
+              npu_platform: str = None) -> dict:
     """集成路径:真实加载模型并转写,返回 metrics dict(见 format_report 契约)。
 
     本函数是唯一碰 openvino 的地方(懒导入);NPU 走静态管线
@@ -138,6 +155,9 @@ def run_bench(model_dir: str, device: str, wav: str, runs: int = 3,
 
     samples = _load_wav(wav)
     config = {"STATIC_PIPELINE": True} if device == "NPU" else {}
+    if device == "NPU" and npu_platform:
+        # 驱动 1.38.0 仍不向编译器上报平台描述(AUTO_DETECT 失败),需显式指定
+        config["NPU_PLATFORM"] = npu_platform
 
     t0 = time.perf_counter()
     pipe = WhisperPipeline(model_dir, device=device, **config)
@@ -199,11 +219,18 @@ def main(argv: list = None) -> int:
     if not os.path.isfile(ns.wav):
         print(f"[bench] wav not found: {ns.wav}", file=sys.stderr)
         return 2
+    if ns.device == "NPU" and needs_reexec_for_npu(dict(os.environ)):
+        # 带上 NPU 库路径重新 exec(ld.so 只在启动时读 LD_LIBRARY_PATH,
+        # 运行中修改无效;哨兵防循环)
+        env = dict(os.environ)
+        set_npu_library_path(env)
+        env["_NPU_BENCH_REEXEC"] = "1"
+        os.execve(sys.executable, [sys.executable] + sys.argv, env)
     try:
         metrics = run_bench(
             ns.model_dir, ns.device, ns.wav,
             runs=ns.runs, timeout_s=ns.timeout_s,
-            max_new_tokens=ns.max_new_tokens,
+            max_new_tokens=ns.max_new_tokens, npu_platform=ns.npu_platform,
         )
     except Exception as e:  # 模型/设备级失败:可行动错误 + exit 3(spec 契约)
         print(f"[bench] pipeline failure on {ns.device}: {e}", file=sys.stderr)

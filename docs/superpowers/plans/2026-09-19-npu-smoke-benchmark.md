@@ -137,3 +137,11 @@ def run_bench(model_dir: str, device: str, wav: str, runs: int = 3, timeout_s: i
 | faster-whisper CPU int8 (#16 A6 参考) | Systran small | ~0(预载) | 3.4s(单次总) | — | 今天测试语音输入引擎重购,Hello World,这个是CPU引擎的验收。 |
 | ov-genai CPU (#17) | OpenVINO small-int8-ov | 1.53s | 1.98s | **1.75s** | 今天测试语音输入引擎重构HoloWord这个是CPU引擎的验收 |
 | ov-genai NPU (#17) | 同上 | — | — | **被驱动阻断** | — |
+
+
+### 终版(驱动 1.38.0 后,A4 翻盘 ✅)
+
+驱动升级(本地重打包 AUR→1.38.0)+ 模块重载后,NPU 全链路通:
+- A1 ✅(重验,含 re-exec 机制)/ A2 ✅ 18 tests / A3 ✅ CPU 1.74s / A4 ✅ **NPU 0.29s** / A5 ✅ 表见 results 文件
+- 新增脚本能力: --npu-platform(驱动仍不报平台)、needs_reexec_for_npu(进程内改 env 对 ld.so 无效的兜底)
+- U1: NPU 文本与 CPU 逐字一致(待用户确认即闭环) / U2: 数据强烈支持 #19 GO(待用户拍板)

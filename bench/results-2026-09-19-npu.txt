@@ -55,3 +55,38 @@ any_run_timeout=false
 2. 升级后直接重跑: bench/npu-bench.py --device NPU(库已注入 venv,平台名建议
    NPU_PLATFORM=NPU4000 显式指定,或验证 AUTO_DETECT 是否恢复)。
 3. 若 1.38 仍失败,再考虑 AUR openvino-intel-npu-plugin(源码构建,与 Arch 环境对齐)。
+
+---
+
+## ✅ 驱动升级后复测(2026-09-19 22:00,driver 1.32.1 → 1.38.0)
+
+前置变更: 本地重打包 AUR intel-npu-driver-bin → 1.38.0(pacman 干净替换),
+intel_vpu 模块重载,固件 vpu_40xx_v1.bin(2026-08-20)生效。venv 内注入的
+编译器三件套保留(驱动包 1.38.0 现在系统级自带 libopenvino_intel_npu_compiler,
+与注入库并存,实测可工作)。
+
+两个新发现(已修入脚本):
+1. AUTO_DETECT 仍失败(驱动不向编译器上报平台)→ 需显式 NPU_PLATFORM=NPU4000
+   (Lunar Lake 真名),脚本新增 --npu-platform 参数
+2. os.environ 运行中修改 LD_LIBRARY_PATH 对 ld.so 无效(A/B 实测:进程内改只有
+   CPU,启动时设才有 NPU)→ 脚本新增 needs_reexec_for_npu + 自 re-exec 机制
+
+正式结果(脚本本体,bench 上下文):
+```
+device=NPU model_dir=.../whisper-small-int8-ov/snapshots/5b831719e.../
+model_load_s=49.017 first_transcribe_s=0.591
+warm_runs=3 mean_s=0.294 min_s=0.290 max_s=0.298
+text_first=今天测试语音输入引擎重构HoloWord这个是CPU引擎的验收
+any_run_timeout=false
+```
+
+终版对比(8.05s 中文语音):
+| 引擎/设备 | 加载 | 首转 | 热跑均值 | 相对现役 |
+|---|---|---|---|---|
+| faster-whisper CPU int8(#16 现役) | — | — | 3.40s | 1x |
+| ov-genai CPU | 1.5s | 2.0s | 1.74s | ~2x |
+| ov-genai NPU(1.38.0 + NPU4000) | 49.0s(一次性静态编译) | 0.59s | **0.29s** | **~12x** |
+
+文本质量:NPU 与 CPU 转写逐字一致,且都把 faster-whisper 误识的同音字「重构」
+认对。48s 静态编译仅在进程启动发生一次(常驻进程如 voice-ptt 无感;冷启动缓存
+优化留给 #19 探索 CACHE_DIR)。

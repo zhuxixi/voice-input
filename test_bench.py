@@ -51,6 +51,12 @@ class TestParseArgs(unittest.TestCase):
         with self.assertRaises(SystemExit):
             bench.parse_args(self.BASE)  # 缺 --device
 
+    def test_npu_platform_default_none_and_parsed(self):
+        base = ["--model-dir", "d", "--device", "npu", "--wav", "w.wav"]
+        self.assertIsNone(bench.parse_args(base).npu_platform)
+        ns = bench.parse_args(base + ["--npu-platform", "NPU4000"])
+        self.assertEqual(ns.npu_platform, "NPU4000")
+
 
 class TestSetNpuLibraryPath(unittest.TestCase):
     """A2:NPU 库路径前插(注入式,幂等,不动 os.environ)。"""
@@ -148,6 +154,22 @@ class TestPurity(unittest.TestCase):
             cwd=_REPO, capture_output=True,
         )
         self.assertEqual(proc.returncode, 2)
+
+
+
+class TestNeedsReexec(unittest.TestCase):
+    """A2:re-exec 判定纯函数(进程内改 env 对 ld.so 无效的兜底机制)。"""
+
+    def test_needs_when_missing(self):
+        self.assertTrue(bench.needs_reexec_for_npu({}))
+        self.assertTrue(bench.needs_reexec_for_npu({"LD_LIBRARY_PATH": "/usr/lib"}))
+
+    def test_no_reexec_when_present(self):
+        env = {"LD_LIBRARY_PATH": bench.NPU_LIB_DIR + ":/usr/lib"}
+        self.assertFalse(bench.needs_reexec_for_npu(env))
+
+    def test_no_reexec_loop_with_sentinel(self):
+        self.assertFalse(bench.needs_reexec_for_npu({"_NPU_BENCH_REEXEC": "1"}))
 
 
 if __name__ == "__main__":
