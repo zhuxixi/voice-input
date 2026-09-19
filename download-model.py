@@ -82,11 +82,16 @@ def main():
     # VOICE_INPUT_ENGINE=cpu 的机器也能跑本脚本;auto 先试 cuda 失败降级 cpu)
     sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
     import engine
-    eng = engine.engine_name(dict(os.environ))
-    if eng == "npu":
-        print("NPU engine not implemented yet — see issue #19", file=sys.stderr)
+    try:
+        eng = engine.engine_name(dict(os.environ))
+        if eng == "npu":
+            print("NPU engine not implemented yet — see issue #19", file=sys.stderr)
+            sys.exit(1)
+        kwargs = engine.construction_kwargs(eng)
+    except ValueError as e:
+        # 与 voice-ptt.py/transcribe_once.py 一致:可行动错误干净退出,不裸 traceback
+        print(e, file=sys.stderr)
         sys.exit(1)
-    kwargs = engine.construction_kwargs(eng)
     print("开始下载（首次约 3GB）...")
     print("进度条应该很快出现，如果没有说明网络仍有问题")
     print()

@@ -177,3 +177,15 @@ CR 原始发现 10 条(合并重复后 8 条独立):修复 5(1/2/3/4/6),记录�
 | 8 preamble 第 5 份拷贝(PLAUSIBLE) | 📝 延后 | spec 明确接受本次复制;#19 追加 NPU 路径时统一收敛到 engine 可调用函数(记录于 #19) |
 
 修正后回归: 56 tests OK(`test_terms test_archive test_media_pause test_engine`);保护文件仍零 diff;U2 隔离重跑全过(含 skip 逻辑)。
+
+### Zima CR Round 1（PR #21，2026-09-19 18:08，pi-cr-meta）
+
+0 blocking / 3 low advisory，全部当场修复（增量轮验证中）：
+
+| # | Advisory | 处置 |
+|---|----------|------|
+| 1 | voice-ptt.py main() 不捕获 npu 占位的 NotImplementedError，GUI 入口裸 traceback，与其他三处入口不一致 | ✅ except 扩为 (RuntimeError, ValueError, NotImplementedError) |
+| 2 | download-model.py 非法 VOICE_INPUT_ENGINE 值裸 traceback | ✅ try/except ValueError → stderr + exit 1，与其他入口对齐 |
+| 3 | download-model.sh 非model.bin 文件「已存在即跳过」不校验完整性，#15 遗留 15B 404 假文件会被永久跳过 | ✅ HEAD 完整性对账推广到所有文件：匹配→跳过；小文件不符→删掉重下；model.bin 不符→保留断点续传；HEAD 失败→退回旧规则。场景实测：预置 15B 假 config.json + 完整 model.bin → 假文件重下(2370B 真内容)、model.bin 跳过(461MB)、cpu 验证过 |
+
+修复后回归：56 tests OK；py_compile/bash -n 过；自愈场景实测过。

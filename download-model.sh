@@ -44,19 +44,23 @@ download_file() {
     local filepath="$DEST/$filename"
     local url="$MIRROR/$REPO/resolve/main/$filename"
 
-    if [ -f "$filepath" ] && [ "$filename" != "model.bin" ]; then
-        echo "  [跳过] $filename (已存在)"
-        return 0
-    fi
-
-    # HEAD 对账远端大小:本地已完整(含上次已下完的 model.bin)则跳过;
-    # HEAD 失败(空 expected)则安全降级为直接下载
+    # HEAD 对账远端大小,完整性校验推广到所有文件(Zima CR 建议 3):
+    # 大小匹配 → 跳过(含已完整的 model.bin,修复旧代码整包重下);
+    # 小文件大小不符(如 #15 遗留的 15B 404 假文件)→ 删掉重下(体量小,不值得续传);
+    # model.bin 大小不符 → 保留断点续传;HEAD 失败(空 expected)→ 退回旧规则
     local expected
     expected=$(curl -fsSLI --max-time 30 "$url" 2>/dev/null | tr -d '\r' \
         | awk 'tolower($1)=="content-length:"{print $2}' | tail -1 || true)
-    if [ -n "$expected" ] && [ -f "$filepath" ] \
-        && [ "$(stat -c %s "$filepath" 2>/dev/null)" = "$expected" ]; then
-        echo "  [跳过] $filename (已完整: $((expected / 1048576)) MB)"
+    if [ -n "$expected" ]; then
+        if [ -f "$filepath" ] && [ "$(stat -c %s "$filepath" 2>/dev/null)" = "$expected" ]; then
+            echo "  [跳过] $filename (已完整: $((expected / 1048576)) MB)"
+            return 0
+        fi
+        if [ -f "$filepath" ] && [ "$filename" != "model.bin" ]; then
+            rm -f "$filepath"
+        fi
+    elif [ -f "$filepath" ] && [ "$filename" != "model.bin" ]; then
+        echo "  [跳过] $filename (已存在)"
         return 0
     fi
 

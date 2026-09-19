@@ -262,9 +262,10 @@ def main():
     print("[voice-input] Preloading model...", flush=True)
     try:
         load_model()
-    except (RuntimeError, ValueError) as e:
-        # engine 的可行动错误(模型缺失/非法 env 值)应像 venv 守卫一样干净退出,
-        # 而非裸 traceback(#16:engine_name 非法值是 ValueError)
+    except (RuntimeError, ValueError, NotImplementedError) as e:
+        # engine 的可行动错误(模型缺失/非法 env 值/npu 占位)应像 venv 守卫一样干净退出,
+        # 而非裸 traceback(#16:engine_name 非法值 ValueError;npu 占位 NotImplementedError,
+        # 与 toggle/test-mic 预检、transcribe_once 的干净报错对齐)
         sys.stderr.write(f"[voice-input] {e}\n")
         sys.exit(1)
     print("[voice-input] Ready! 按住右 Command 键录音，松开转写", flush=True)
