@@ -12,7 +12,21 @@ DEST="$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-${MODEL}/snap
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 VENV="$REPO_DIR/venv"
 
-FILES="config.json preprocessor_config.json tokenizer.json vocabulary.json model.bin"
+# 各 HF 仓库文件清单不同(#15):large-v3 有 preprocessor_config.json/vocabulary.json;
+# small 没有 vocabulary.json/preprocessor_config.json,取而代之是 vocabulary.txt。
+# 按模型显式配清单,未知模型报错列出支持名,避免把镜像 404 响应体下成假文件。
+case "$MODEL" in
+    large-v3)
+        FILES="config.json preprocessor_config.json tokenizer.json vocabulary.json model.bin"
+        ;;
+    small)
+        FILES="config.json tokenizer.json vocabulary.txt model.bin"
+        ;;
+    *)
+        echo "不支持的模型: $MODEL (当前支持: large-v3, small)" >&2
+        exit 1
+        ;;
+esac
 
 echo "=== 下载 faster-whisper 模型: $MODEL ==="
 echo "源: $MIRROR/$REPO"
@@ -20,33 +34,51 @@ echo ""
 
 mkdir -p "$DEST"
 
-# 下载文件，支持断点续传
+# 下载文件,支持跨运行断点续传(#16 CR 发现 2:-C - 直写目标文件,
+# 失败保留部分进度,重跑续传——慢速链路下 3GB 的 large-v3 才能下完)。
+# curl -f:HTTP >=400 不写任何字节,镜像 404 响应体(如 "Entry not found")
+# 不再伪装成成功文件(#15);完整性用 HEAD Content-Length 对账,已完整的
+# model.bin 跳过(修复旧代码重跑整包重下 3GB 的回归)。
 download_file() {
     local filename=$1
     local filepath="$DEST/$filename"
+    local url="$MIRROR/$REPO/resolve/main/$filename"
 
-    if [ -f "$filepath" ] && [ "$filename" != "model.bin" ]; then
+    # HEAD 对账远端大小,完整性校验推广到所有文件(Zima CR 建议 3):
+    # 大小匹配 → 跳过(含已完整的 model.bin,修复旧代码整包重下);
+    # 小文件大小不符(如 #15 遗留的 15B 404 假文件)→ 删掉重下(体量小,不值得续传);
+    # model.bin 大小不符 → 保留断点续传;HEAD 失败(空 expected)→ 退回旧规则
+    local expected
+    expected=$(curl -fsSLI --max-time 30 "$url" 2>/dev/null | tr -d '\r' \
+        | awk 'tolower($1)=="content-length:"{print $2}' | tail -1 || true)
+    if [ -n "$expected" ]; then
+        if [ -f "$filepath" ] && [ "$(stat -c %s "$filepath" 2>/dev/null)" = "$expected" ]; then
+            echo "  [跳过] $filename (已完整: $((expected / 1048576)) MB)"
+            return 0
+        fi
+        if [ -f "$filepath" ] && [ "$filename" != "model.bin" ]; then
+            rm -f "$filepath"
+        fi
+    elif [ -f "$filepath" ] && [ "$filename" != "model.bin" ]; then
         echo "  [跳过] $filename (已存在)"
         return 0
     fi
 
     echo -n "  [下载] $filename ... "
-    local url="$MIRROR/$REPO/resolve/main/$filename"
-
-    # 用 curl 下载，支持断点续传
-    local code
-    code=$(curl -L -# -o "$filepath" -w "%{http_code}" -C - --max-time 600 "$url" 2>&1) || true
-
-    if [ -f "$filepath" ] && [ "$(stat -c %s "$filepath" 2>/dev/null)" -gt 0 ]; then
+    if curl -fL -# -o "$filepath" -C - --max-time 600 "$url"; then
         local size
         size=$(stat -c %s "$filepath")
         if [ $size -gt 1048576 ]; then
-            echo "OK ($(echo "scale=1; $size/1048576" | bc) MB)"
+            echo "OK ($((size / 1048576)) MB)"
         else
             echo "OK (${size} B)"
         fi
     else
-        echo "FAILED"
+        if [ -f "$filepath" ] && [ "$(stat -c %s "$filepath" 2>/dev/null)" -gt 0 ]; then
+            echo "FAILED (部分进度已保留,重跑本脚本断点续传)"
+        else
+            echo "FAILED"
+        fi
         return 1
     fi
 }
@@ -65,12 +97,16 @@ echo "所有文件下载完成!"
 echo "模型路径: $DEST"
 echo ""
 
-# 更新 test-mic.sh 中的模型路径
+# 验证模型(#16):走 engine.build_model(),模型取本次下载的 $MODEL,验证设备按
+# VOICE_INPUT_ENGINE 选择(默认 cuda,与历史一致;无 NVIDIA 机器可
+# VOICE_INPUT_ENGINE=cpu 验证)
 echo "验证模型..."
 if "$VENV/bin/python3" -c "
-from faster_whisper import WhisperModel
+import sys
+sys.path.insert(0, '$REPO_DIR')
+import engine
 print('加载模型...')
-model = WhisperModel('$DEST', device='cuda', compute_type='float16')
+engine.build_model(model='$MODEL')
 print('模型加载成功!')
 "; then
     echo ""

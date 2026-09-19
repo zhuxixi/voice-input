@@ -17,18 +17,6 @@ export LD_LIBRARY_PATH="$SITE_PACKAGES/nvidia/cublas/lib:$SITE_PACKAGES/nvidia/c
 PIDFILE="/tmp/voice-input-recording.pid"
 WAVFILE="/tmp/voice-input-recording.wav"
 
-# Pick the first snapshot dir containing model.bin (#11).
-SNAPSHOTS="$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3/snapshots"
-MODEL_PATH=""
-for d in "$SNAPSHOTS"/*/; do
-    [ -f "${d}model.bin" ] && MODEL_PATH="${d%/}" && break
-done
-if [ -z "$MODEL_PATH" ]; then
-    echo "model not found under $SNAPSHOTS — run ./download-model.sh first" >&2
-    notify-send -t 2000 "Voice Input" "模型未找到，请先运行 ./download-model.sh"
-    exit 1
-fi
-
 if [ -f "$PIDFILE" ]; then
     # 第二次按：停止录音 → 转写 → 打字
     PID=$(cat "$PIDFILE")
@@ -41,13 +29,11 @@ if [ -f "$PIDFILE" ]; then
 
     notify-send -t 500 "Voice Input" "转写中..."
 
-    TEXT=$("$VENV/bin/python3" -c "
-from faster_whisper import WhisperModel
-model = WhisperModel('$MODEL_PATH', device='cuda', compute_type='float16')
-segments, info = model.transcribe('$WAVFILE', language='zh')
-text = ''.join(s.text for s in segments).strip()
-print(text)
-" 2>/dev/null)
+    # 转写走 transcribe_once 入口(#16):引擎/模型经 VOICE_INPUT_ENGINE /
+    # VOICE_INPUT_MODEL 选择,不再内嵌 CUDA 调用(默认 cuda,与历史行为一致);
+    # stderr 不再重定向(2>/dev/null 会吞掉 engine 的可行动错误,CR 发现 1),
+    # 预检已挡掉绝大多数配置错误,这里失败时终端里能看到真实原因
+    TEXT=$("$VENV/bin/python3" "$REPO_DIR/transcribe_once.py" "$WAVFILE")
 
     rm -f "$WAVFILE"
 
@@ -58,7 +44,30 @@ print(text)
         notify-send -t 1000 "Voice Input" "未识别到语音"
     fi
 else
-    # 第一次按：开始录音
+    # 第一次按：先快速预检(#16 CR 发现 1):引擎值合法 + 模型已在本地,
+    # 不加载模型(毫秒级),失败即弹可行动错误并拒绝录音——重建旧代码
+    # 「第一次按键前模型必须已验证」的不变量,避免录完一段话才报错、
+    # 且录音已被删除的精失体验
+    PRECHECK_ERR=$("$VENV/bin/python3" -c "
+import os, sys
+sys.path.insert(0, '$REPO_DIR')
+import engine
+try:
+    eng = engine.engine_name(dict(os.environ))
+    if eng == 'npu':
+        raise NotImplementedError('NPU engine not implemented yet - see issue #19')
+    engine.resolve_model_path()
+except (ValueError, RuntimeError, NotImplementedError) as e:
+    print(e)
+    sys.exit(1)
+" 2>&1)
+    if [ $? -ne 0 ]; then
+        echo "voice-toggle.sh: $PRECHECK_ERR" >&2
+        notify-send -t 5000 "Voice Input" "$PRECHECK_ERR"
+        exit 1
+    fi
+
+    # 开始录音
     # 走 PipeWire default，与 voice-ptt.py #6 行为一致，避免 EBUSY 抢占
     arecord -q -f S16_LE -r 16000 -c 1 -D default "$WAVFILE" &
     echo $! > "$PIDFILE"

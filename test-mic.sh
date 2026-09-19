@@ -16,16 +16,24 @@ export LD_LIBRARY_PATH="$SITE_PACKAGES/nvidia/cublas/lib:$SITE_PACKAGES/nvidia/c
 
 WAV="/tmp/test-mic.wav"
 
-# Pick the first snapshot dir containing model.bin (#11): accepts both the
-# hashed dir (huggingface_hub layout) and the plain `downloaded` dir from
-# download-model.sh, so a fresh install needs no manual renaming.
-SNAPSHOTS="$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3/snapshots"
-MODEL_PATH=""
-for d in "$SNAPSHOTS"/*/; do
-    [ -f "${d}model.bin" ] && MODEL_PATH="${d%/}" && break
-done
-if [ -z "$MODEL_PATH" ]; then
-    echo "model not found under $SNAPSHOTS — run ./download-model.sh first" >&2
+# 录音前快速预检(#16 CR 发现 3):引擎值合法 + 模型已在本地,不加载模型。
+# 重建旧代码「录音前 fail fast」的时序,新装机器不必先说 5 秒话才看到
+# 「模型未下载」的错误,也避免「转写失败」与「未识别到语音」混在同一输出
+PRECHECK_ERR=$("$VENV/bin/python3" -c "
+import os, sys
+sys.path.insert(0, '$REPO_DIR')
+import engine
+try:
+    eng = engine.engine_name(dict(os.environ))
+    if eng == 'npu':
+        raise NotImplementedError('NPU engine not implemented yet - see issue #19')
+    engine.resolve_model_path()
+except (ValueError, RuntimeError, NotImplementedError) as e:
+    print(e)
+    sys.exit(1)
+" 2>&1)
+if [ $? -ne 0 ]; then
+    echo "test-mic.sh: $PRECHECK_ERR" >&2
     exit 1
 fi
 
@@ -37,15 +45,17 @@ if [ ! -f "$WAV" ]; then
     exit 1
 fi
 
+# 转写走 transcribe_once 入口(#16):引擎/模型经 VOICE_INPUT_ENGINE /
+# VOICE_INPUT_MODEL 选择,不再内嵌 CUDA 调用(默认 cuda,与历史行为一致)
 echo "转写中..."
-"$VENV/bin/python3" -c "
-from faster_whisper import WhisperModel
-model = WhisperModel('$MODEL_PATH', device='cuda', compute_type='float16')
-segments, info = model.transcribe('$WAV', language='zh')
-text = ''.join(s.text for s in segments).strip()
-print()
-print('识别结果:')
-print(text)
-"
+TEXT=$("$VENV/bin/python3" "$REPO_DIR/transcribe_once.py" "$WAV")
 
 rm -f "$WAV"
+
+if [ -n "$TEXT" ]; then
+    echo
+    echo "识别结果:"
+    echo "$TEXT"
+else
+    echo "未识别到语音"
+fi
