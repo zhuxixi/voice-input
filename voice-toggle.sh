@@ -38,7 +38,9 @@ if [ -f "$PIDFILE" ]; then
     rm -f "$WAVFILE"
 
     if [ -n "$TEXT" ]; then
-        xdotool type --clearmodifiers --delay 0 "$TEXT"
+        # 上屏分流走 paste.py(#18):wayland 粘贴(wl-copy+wtype)/直打,x11 保留
+        # xdotool 现状;用系统 python3(paste.py 纯标准库,不依赖 venv)
+        printf '%s' "$TEXT" | python3 "$REPO_DIR/paste.py"
         notify-send -t 1000 "Voice Input" "$TEXT"
     else
         notify-send -t 1000 "Voice Input" "未识别到语音"
