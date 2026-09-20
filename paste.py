@@ -195,7 +195,13 @@ def main(argv=None) -> int:
 
     for cmd in commands:
         try:
-            proc = subprocess.run(cmd["argv"], input=cmd["stdin"])
+            # stdin must be bytes for subprocess (str raises TypeError in
+            # communicate(); found in live U1 testing — dry-run/missing-tool
+            # tests never exercised a real stdio-consuming child)
+            proc = subprocess.run(
+                cmd["argv"],
+                input=cmd["stdin"].encode() if cmd["stdin"] is not None else None,
+            )
         except FileNotFoundError as e:
             print(
                 f"[voice-input] paste: required tool not found: "

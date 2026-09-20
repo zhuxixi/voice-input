@@ -251,6 +251,33 @@ class TestCLIIntegration(unittest.TestCase):
         )
         self.assertIn("wtype argv text", proc.stdout.decode())
 
+    def test_real_execution_feeds_stdin_bytes(self):
+        # Live U1 regression: the real wayland+paste path feeds the text to
+        # wl-copy via stdin — subprocess requires bytes, a str crashes with
+        # TypeError (dry-run and missing-tool tests never execute a real
+        # stdio-consuming child, which is why this slipped through CR)
+        with tempfile.TemporaryDirectory() as td:
+            copy_out = os.path.join(td, "copied.txt")
+            wtype_out = os.path.join(td, "wtyped.txt")
+            for name, body in [
+                ("wl-copy", f'#!/bin/sh\ncat > "{copy_out}"\n'),
+                ("wtype", f'#!/bin/sh\necho "$@" > "{wtype_out}"\n'),
+            ]:
+                p = os.path.join(td, name)
+                with open(p, "w") as f:
+                    f.write(body)
+                os.chmod(p, 0o755)
+            proc = self._run(
+                ["--session-type", "wayland"],
+                path=td + ":/usr/bin:/bin",  # shims first; cat/echo resolvable
+                env_extra={"COPY_OUT": copy_out, "WTYPE_OUT": wtype_out},
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+            with open(copy_out) as f:
+                self.assertEqual(f.read(), "hi")      # stdin delivered as bytes
+            with open(wtype_out) as f:
+                self.assertIn("-k v", f.read())       # combo followed
+
     def test_usage_error_exits_2_per_repo_convention(self):
         # CR finding 7: usage errors keep the stock argparse exit code 2
         # (repo convention: 2=usage, 3=runtime — transcribe_once / npu-bench)
