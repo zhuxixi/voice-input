@@ -119,7 +119,7 @@ use the toggle mode instead:
 
 1. System Settings → Keyboard → Shortcuts → **Add New** → **Command or Script…**
 2. Command: `bash /absolute/path/to/voice-input/voice-toggle.sh`
-3. Bind a key (e.g. `Meta+V`) and press it once to start recording, once more
+3. Bind a key (e.g. `Meta+F2`, or anything you like) and press it once to start recording, once more
    to stop — the transcript is delivered to the focused window.
 
 Requires `wl-clipboard` and `wtype` (`sudo pacman -S wl-clipboard wtype`).

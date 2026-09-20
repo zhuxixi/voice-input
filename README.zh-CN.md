@@ -106,7 +106,7 @@ EOF
 
 1. 系统设置 → 键盘 → 快捷键 → **添加新的** → **命令或脚本…**
 2. 命令填：`bash /voice-input/的/绝对路径/voice-toggle.sh`
-3. 绑一个键（如 `Meta+V`）：按一下开始录音，再按一下停止——转写文本会送到当前焦点窗口。
+3. 绑一个键（如 `Meta+F2`，任意顺手键位）：按一下开始录音，再按一下停止——转写文本会送到当前焦点窗口。
 
 需安装 `wl-clipboard` 与 `wtype`（`sudo pacman -S wl-clipboard wtype`）。
 上屏默认走剪贴板粘贴（`wl-copy` + 模拟 `Ctrl+Shift+V`），免疫输入法 preedit 吞字、
