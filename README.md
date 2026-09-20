@@ -111,6 +111,34 @@ EOF
 
 Adjust the `Exec` path to your actual install location.
 
+### Wayland (KDE)
+
+`voice-ptt.sh` / `voice-ptt.py` (push-to-talk) rely on `pynput` global-key
+grabbing and `xdotool`, which are X11-only. On a KDE Plasma Wayland session
+use the toggle mode instead:
+
+1. System Settings → Keyboard → Shortcuts → **Add New** → **Command or Script…**
+2. Command: `bash /absolute/path/to/voice-input/voice-toggle.sh`
+3. Bind a key (e.g. `Meta+V`) and press it once to start recording, once more
+   to stop — the transcript is delivered to the focused window.
+
+Requires `wl-clipboard` and `wtype` (`sudo pacman -S wl-clipboard wtype`).
+Delivery defaults to clipboard paste (`wl-copy` + simulated `Ctrl+Shift+V`),
+which is immune to input-method preedit capture, editor auto-close doubling
+and newlines acting as Enter.
+
+Known limitations (Wayland):
+
+- If focus moves to another window while recording, the text lands in the new
+  window (toggle-mode limitation; push-to-talk holds focus but is X11-only).
+- The paste method overwrites the clipboard — recover previous contents from
+  the Klipper history (`Meta+V`).
+- `VOICE_INPUT_WAYLAND_METHOD=type` delivers via simulated typing instead
+  (keeps the clipboard untouched), but with an active CJK input method
+  (fcitx5) ASCII fragments may be swallowed by the preedit — keep the input
+  method inactive while typing (`fcitx5-remote -c`) or prefer the default
+  paste method.
+
 ## Configuration
 
 All settings with their defaults and how to change them:
@@ -120,6 +148,8 @@ All settings with their defaults and how to change them:
 | `VOICE_INPUT_ARCHIVE` | `1` (on) | Archive each recording (audio + transcript) to `~/.local/share/voice-input/recordings/` (one directory per recording + an `index.jsonl` index) | `VOICE_INPUT_ARCHIVE=0 ./voice-ptt.sh` |
 | `VOICE_INPUT_PAUSE_MEDIA` | `1` (on) | Auto-pause MPRIS players (Chrome etc.) while recording, resume after release | `VOICE_INPUT_PAUSE_MEDIA=0 ./voice-ptt.sh` |
 | `~/.config/voice-input/terms.json` | (none) | Custom vocabulary hotwords, see below | Edit the file |
+| `VOICE_INPUT_WAYLAND_METHOD` | `paste` | Wayland text delivery: `paste` = clipboard paste (`wl-copy` + `wtype` combo), `type` = simulated typing | Set in the KDE shortcut command, e.g. `VOICE_INPUT_WAYLAND_METHOD=type bash /path/to/voice-toggle.sh` |
+| `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | Paste key combo for the Wayland paste method (terminal convention; use `ctrl+v` for apps like VS Code that only bind plain paste) | Set in the KDE shortcut command, e.g. `VOICE_INPUT_PASTE_COMBO=ctrl+v bash /path/to/voice-toggle.sh` |
 
 ### Custom vocabulary (hotwords)
 
@@ -174,9 +204,10 @@ Use `arecord -l` only to troubleshoot raw devices, not to pick the capture devic
 | `archive.py` | Archives each recording (audio + transcript) under `~/.local/share/voice-input/recordings/` with an `index.jsonl` index |
 | `media_pause.py` | Pauses/resumes MPRIS media via D-Bus; zero extra dependencies |
 | `voice-toggle.sh` | Alternative toggle mode: press once to start, press again to stop and type |
+| `paste.py` | Text delivery for toggle mode: builds the wayland/x11 paste command sequence (session-aware, #18) |
 | `test-mic.sh` | Microphone test |
 | `download-model.sh` / `download-model.py` | Model download (hf-mirror.com mirror + DoH DNS workaround for polluted DNS) |
-| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` | Unit tests (stdlib `unittest`) |
+| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` / `test_paste.py` | Unit tests (stdlib `unittest`) |
 | `bench/` | NPU/CPU transcription benchmark tool + archived results (`npu-bench.py`, #17) |
 | `docs/` | Design documents (mostly Chinese; the newer `superpowers/` plans are English) |
 
@@ -254,7 +285,7 @@ The author's setup, for reference:
 ## Testing
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause test_bench -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste -v
 ```
 
 The tests use only the standard library and don't touch the GPU.

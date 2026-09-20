@@ -99,6 +99,28 @@ EOF
 
 将 `Exec` 路径改为实际安装路径。
 
+### Wayland（KDE）
+
+`voice-ptt.sh` / `voice-ptt.py`（按住说话模式）依赖 `pynput` 全局按键监听与
+`xdotool`，两者均仅限 X11。KDE Plasma Wayland 会话请改用切换模式：
+
+1. 系统设置 → 键盘 → 快捷键 → **添加新的** → **命令或脚本…**
+2. 命令填：`bash /voice-input/的/绝对路径/voice-toggle.sh`
+3. 绑一个键（如 `Meta+V`）：按一下开始录音，再按一下停止——转写文本会送到当前焦点窗口。
+
+需安装 `wl-clipboard` 与 `wtype`（`sudo pacman -S wl-clipboard wtype`）。
+上屏默认走剪贴板粘贴（`wl-copy` + 模拟 `Ctrl+Shift+V`），免疫输入法 preedit 吞字、
+编辑器自动补全 doubling、换行变回车三类问题。
+
+已知限制（Wayland）：
+
+- 录音期间焦点若切到别的窗口，文本会打进新窗口（切换模式的固有限制；按住说话模式
+  焦点不变，但仅限 X11）。
+- 粘贴方式会覆盖剪贴板——旧内容可从 Klipper 历史找回（`Meta+V`）。
+- `VOICE_INPUT_WAYLAND_METHOD=type` 改为模拟打字（不动剪贴板），但输入法
+  （fcitx5）处于激活态时英文片段可能被 preedit 吞掉——打字前先切到非激活态
+  （`fcitx5-remote -c`），或保持默认粘贴方式。
+
 ## 配置
 
 所有配置项、默认值与修改方式：
@@ -108,6 +130,8 @@ EOF
 | `VOICE_INPUT_ARCHIVE` | `1`（开） | 每次录音归档（音频 + 转写文本）到 `~/.local/share/voice-input/recordings/`（每条一目录 + `index.jsonl` 索引） | `VOICE_INPUT_ARCHIVE=0 ./voice-ptt.sh` |
 | `VOICE_INPUT_PAUSE_MEDIA` | `1`（开） | 录音时自动暂停 MPRIS 播放器（Chrome 等），松手后恢复 | `VOICE_INPUT_PAUSE_MEDIA=0 ./voice-ptt.sh` |
 | `~/.config/voice-input/terms.json` | （无） | 自定义词汇热词，见下 | 编辑该文件 |
+| `VOICE_INPUT_WAYLAND_METHOD` | `paste` | Wayland 上屏方式：`paste` = 剪贴板粘贴（`wl-copy` + `wtype` 组合键），`type` = 模拟打字 | 在 KDE 快捷键命令里设置，如 `VOICE_INPUT_WAYLAND_METHOD=type bash /路径/voice-toggle.sh` |
+| `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | Wayland 粘贴方式的组合键（终端惯例；VS Code 等只绑纯粘贴键的应用改 `ctrl+v`） | 在 KDE 快捷键命令里设置，如 `VOICE_INPUT_PASTE_COMBO=ctrl+v bash /路径/voice-toggle.sh` |
 
 ### 自定义词汇（热词）
 
@@ -151,9 +175,10 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 | `archive.py` | 录音归档（音频 + 转写文本存到 `~/.local/share/voice-input/recordings/`，含 `index.jsonl` 索引） |
 | `media_pause.py` | 录音时自动暂停/恢复 MPRIS 媒体（Chrome 等），走系统 D-Bus，零依赖 |
 | `voice-toggle.sh` | 切换模式脚本（按一下开始，再按一下停止并输入） |
+| `paste.py` | 切换模式的上屏分流：构造 wayland/x11 上屏命令序列（按会话类型分流，#18） |
 | `test-mic.sh` | 麦克风测试 |
 | `download-model.sh` / `download-model.py` | 模型下载（hf-mirror.com 镜像 + DoH DNS 修复，绕过 DNS 污染） |
-| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` | 单元测试（标准库 unittest） |
+| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` / `test_paste.py` | 单元测试（标准库 unittest） |
 | `bench/` | NPU/CPU 转写基准工具与结果留档（`npu-bench.py`，#17） |
 | `docs/` | 设计文档（以中文为主；较新的 `superpowers/` 计划为英文） |
 
@@ -223,7 +248,7 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 ## 测试
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause test_bench -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste -v
 ```
 
 测试仅用标准库，不依赖 GPU。
