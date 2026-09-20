@@ -251,6 +251,20 @@ class TestCLIIntegration(unittest.TestCase):
         )
         self.assertIn("wtype argv text", proc.stdout.decode())
 
+    def test_usage_error_exits_2_per_repo_convention(self):
+        # CR finding 7: usage errors keep the stock argparse exit code 2
+        # (repo convention: 2=usage, 3=runtime — transcribe_once / npu-bench)
+        proc = self._run(["--bogus-flag"])
+        self.assertEqual(proc.returncode, 2)
+
+    def test_dispatch_table_covers_valid_methods(self):
+        # CR finding 9: VALID_METHODS must mirror the dispatch table exactly,
+        # so an error message can never advertise a value the code rejects
+        self.assertEqual(set(paste.VALID_METHODS), set(paste._WAYLAND_DISPATCH))
+        for m in paste.VALID_METHODS:
+            cmds = paste.paste_commands("wayland", m, "ctrl+shift+v", "t")
+            self.assertTrue(cmds)
+
 
 if __name__ == "__main__":
     unittest.main()

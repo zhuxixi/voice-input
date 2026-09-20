@@ -69,3 +69,21 @@ Worktree: `.pi/worktrees/issue-18-wayland-paste-hotkey`（所有路径相对 wor
 
 - pi workflow `code-review` 模式跑分支 diff，处置发现（延后项记录 #19/#20）
 - 验收归属：全矩阵对账
+
+### 本地 CR 修正轮(pi workflow code-review,26 agents,2026-09-20)
+
+10 条(8 CONFIRMED / 2 PLAUSIBLE):修 7、README 注记 1(并入 7)、延后 2(#19 记账)。
+
+| # | 发现 | 处置 |
+|---|------|------|
+| 1+4 | voice-toggle.sh:43 吞 paste.py 退出码,失败仍弹成功通知;exit 3 契约在生产调用点是死代码 | ✅ mktemp 捕 stderr + if 检查退出码:失败 → notify-send 5s 错误通知(含 stderr),成功才弹结果 |
+| 5 | 裸 python3 依赖 PATH(NixOS/精简 session 下 127 静默失败) | ✅ 改 `$VENV/bin/python3`(脚本上方预检已保证 venv 存在,与 SITE_PACKAGES 同一不变量) |
+| 7 | _Parser 把 usage error 改 exit 3,偏离仓约定(2=usage/3=runtime) | ✅ 撤 _Parser 用 stock argparse;新增测试钉 exit 2 |
+| 9 | method 集合三处手工编码 | ✅ dispatch table `_WAYLAND_DISPATCH` 单源 + VALID_METHODS 镜像测试 |
+| 10 | CLI-over-env 解析三份逐字复制 | ✅ `_resolve()` helper 收敛 |
+| 2 | XWayland 焦点窗口可能收不到 wtype 键(compositor 依赖) | 📝 README 双语限制清单注记(PLAUSIBLE,目标环境 KWin 原生窗口不构成回归) |
+| 3 | type 法无 --clearmodifiers 等价(用户按住修饰键时字母变快捷键) | 📝 README 双语注记(opt-in 路径,wtype 无机制可清他人修饰键) |
+| 6 | voice-ptt.py 保留第二份上屏实现(保护文件非目标) | 📝 延后:toggle/PTT 上屏统一记到 #19 债务清单 |
+| 8 | 第三份 purity-check + CLI harness 副本(test_engine/test_bench 同款) | 📝 延后:测试 helper 抽取记到 #19 债务清单 |
+
+修正后:106 测试绿(新增 2);保护文件 diff=0;shell 失败分支冒烟通过。

@@ -120,6 +120,9 @@ EOF
 - `VOICE_INPUT_WAYLAND_METHOD=type` 改为模拟打字（不动剪贴板），但输入法
   （fcitx5）处于激活态时英文片段可能被 preedit 吞掉——打字前先切到非激活态
   （`fcitx5-remote -c`），或保持默认粘贴方式。
+- wtype 无法清除用户此刻按住的修饰键（字母可能变成应用快捷键）；焦点在
+  XWayland 窗口时可能收不到模拟按键（与 compositor 相关）。原生 Wayland 窗口
+  上的默认 paste 模式不受影响。
 
 ## 配置
 

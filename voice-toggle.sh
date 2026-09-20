@@ -39,9 +39,16 @@ if [ -f "$PIDFILE" ]; then
 
     if [ -n "$TEXT" ]; then
         # 上屏分流走 paste.py(#18):wayland 粘贴(wl-copy+wtype)/直打,x11 保留
-        # xdotool 现状;用系统 python3(paste.py 纯标准库,不依赖 venv)
-        printf '%s' "$TEXT" | python3 "$REPO_DIR/paste.py"
-        notify-send -t 1000 "Voice Input" "$TEXT"
+        # xdotool 现状。$VENV python(CR 发现 5:裸 python3 依赖 PATH,venv 已在
+        # 上方预检保证存在)。退出码必检查(CR 发现 1/4):失败时 stderr 转成
+        # 错误通知而非成功通知,transcript 不再静默丢失
+        PASTE_ERRFILE=$(mktemp)
+        if printf '%s' "$TEXT" | "$VENV/bin/python3" "$REPO_DIR/paste.py" 2>"$PASTE_ERRFILE"; then
+            notify-send -t 1000 "Voice Input" "$TEXT"
+        else
+            notify-send -t 5000 "Voice Input" "上屏失败: $(cat "$PASTE_ERRFILE")"
+        fi
+        rm -f "$PASTE_ERRFILE"
     else
         notify-send -t 1000 "Voice Input" "未识别到语音"
     fi

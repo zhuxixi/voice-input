@@ -138,6 +138,10 @@ Known limitations (Wayland):
   (fcitx5) ASCII fragments may be swallowed by the preedit — keep the input
   method inactive while typing (`fcitx5-remote -c`) or prefer the default
   paste method.
+- wtype cannot clear modifiers the user is physically holding when the text
+  lands (letters may trigger app shortcuts), and some XWayland-focused windows
+  may not receive synthetic keys (compositor-dependent). Default paste mode on
+  native Wayland windows is unaffected.
 
 ## Configuration
 

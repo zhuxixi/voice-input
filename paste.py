@@ -27,6 +27,24 @@ DEFAULT_COMBO = "ctrl+shift+v"
 
 VALID_METHODS = ("paste", "type")
 
+
+def _wayland_type(combo, text):
+    # combo unused for typing; kept for dispatch signature parity
+    return [{"argv": ["wtype", text], "stdin": None}]
+
+
+def _wayland_paste(combo, text):
+    return [
+        {"argv": ["wl-copy"], "stdin": text},
+        {"argv": ["wtype"] + combo_to_wtype_args(combo), "stdin": None},
+    ]
+
+
+# Single source for the wayland method set (CR finding 9): the dispatch
+# table below is the only place methods are wired; VALID_METHODS mirrors it
+# for error messages and tests.
+_WAYLAND_DISPATCH = {"paste": _wayland_paste, "type": _wayland_type}
+
 # wtype(1) modifier whitelist (man page, verified against wtype 0.4).
 WTYPES_MODIFIERS = ("shift", "capslock", "ctrl", "logo", "win", "alt", "altgr")
 
@@ -97,31 +115,25 @@ def paste_commands(session_type, method, combo, text):
     ["xdotool", "type", "--clearmodifiers", "--delay", "0", text]
     """
     if session_type == WAYLAND:
-        if method == "type":
-            return [{"argv": ["wtype", text], "stdin": None}]
-        if method == "paste":
-            return [
-                {"argv": ["wl-copy"], "stdin": text},
-                {"argv": ["wtype"] + combo_to_wtype_args(combo), "stdin": None},
-            ]
-        raise ValueError(
-            f"unsupported wayland paste method {method!r}; "
-            f"valid values: {', '.join(VALID_METHODS)}"
-        )
+        handler = _WAYLAND_DISPATCH.get(method)
+        if handler is None:
+            raise ValueError(
+                f"unsupported wayland paste method {method!r}; "
+                f"valid values: {', '.join(VALID_METHODS)}"
+            )
+        return handler(combo, text)
     return [{
         "argv": ["xdotool", "type", "--clearmodifiers", "--delay", "0", text],
         "stdin": None,
     }]
 
 
-class _Parser(argparse.ArgumentParser):
-    """argparse variant whose usage errors exit 3 (paste.py error contract:
-    0 = delivered, 3 = invalid params / execution failure)."""
-
-    def error(self, message):
-        self.print_usage(sys.stderr)
-        print(f"[voice-input] paste: {message}", file=sys.stderr)
-        sys.exit(3)
+def _resolve(cli_value, env, var, default):
+    """Knob resolution shared by all three knobs (CR finding 10): CLI flag
+    wins, then environment variable, then spec default."""
+    if cli_value is not None:
+        return cli_value
+    return env.get(var, default)
 
 
 def main(argv=None) -> int:
@@ -131,9 +143,11 @@ def main(argv=None) -> int:
     (voice-toggle.sh pipes the transcript in). Exit codes: 0 = delivered
     (or dry-run printed), 3 = invalid knobs or a command failed.
     """
-    parser = _Parser(
+    parser = argparse.ArgumentParser(
         prog="paste.py",
         description="Deliver text to the focused window (wayland paste / x11 typing).",
+        # stock usage-error exit code 2 (repo convention: 2=usage, 3=runtime,
+        # same as transcribe_once.py / npu-bench.py — CR finding 7)
     )
     parser.add_argument(
         "text", nargs="?",
@@ -158,18 +172,9 @@ def main(argv=None) -> int:
     ns = parser.parse_args(argv)
 
     env = os.environ
-    session_type = (
-        ns.session_type if ns.session_type is not None
-        else env.get(ENV_SESSION)
-    )
-    method = (
-        ns.method if ns.method is not None
-        else env.get(ENV_METHOD, DEFAULT_METHOD)
-    )
-    combo = (
-        ns.combo if ns.combo is not None
-        else env.get(ENV_COMBO, DEFAULT_COMBO)
-    )
+    session_type = _resolve(ns.session_type, env, ENV_SESSION, None)
+    method = _resolve(ns.method, env, ENV_METHOD, DEFAULT_METHOD)
+    combo = _resolve(ns.combo, env, ENV_COMBO, DEFAULT_COMBO)
 
     text = ns.text if ns.text is not None else sys.stdin.read()
 
