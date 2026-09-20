@@ -87,3 +87,27 @@ Worktree: `.pi/worktrees/issue-18-wayland-paste-hotkey`（所有路径相对 wor
 | 8 | 第三份 purity-check + CLI harness 副本(test_engine/test_bench 同款) | 📝 延后:测试 helper 抽取记到 #19 债务清单 |
 
 修正后:106 测试绿(新增 2);保护文件 diff=0;shell 失败分支冒烟通过。
+
+### v3 方向调整(用户拍板 A+,2026-09-20 上午)
+
+实测发现:KWin 未实现 zwp_virtual_keyboard_v1(上游 wishlist bug 502882),wtype
+在 KDE Wayland 原理性不可用;用户同时明确要 7700K 的按住说话手感。spec 升 v3:
+wtype 全退场,全链路走内核层(evdev 监听 + wl-copy + ydotool 注入)。
+
+- paste.py:`combo_to_wtype_args` → `combo_to_ydotool_args`(组合键名→evdev keycode
+  映射表,linux/input-event-codes.h 稳定 ABI);wayland+paste = wl-copy + ydotool key
+  序列;wayland+type = ydotool type;x11 契约不动;缺失工具提示同步
+- voice_hold.py(新):evdev 监听 KEY_RIGHTALT(按下录音/松开转写上屏/autorepeat 忽略),
+  状态机 transition + 设备谓词 is_keyboard_device(排除 ydotool 虚拟设备)+ pick_device
+  (VOICE_INPUT_DEVICE 覆盖)均为纯函数;GTK 浮层 TOPLEVEL/keep_above,gi 缺失静默降级;
+  media_pause 复用;转写走 transcribe_once.py(venv python)
+- test_hold.py(新):A7-A9(状态机矩阵/设备谓词/pick_device 假注入/纯净 import)
+- contrib/voice-hold.service(新):systemd user 单元,Environment 钉 VOICE_INPUT_ENGINE/
+  MODEL(OmniBook 默认 cpu+small)
+- README 双语 Wayland 章节整体重写为 A+ 流程;配置表旋钮改指 systemctl --user edit;
+  文件表补 voice_hold.py/contrib;全量测试命令补 test_hold
+- ydotoold 安装实况:Arch 包带 user 服务(ydotool.service),socket 默认路径与客户端
+  不一致,已写 drop-in(-p /run/user/1000/.ydotool_socket);input 组权限待重登录生效
+
+测试:118 项全绿(104 + test_hold 14)。真执行链路(ydotool 注入 + evdev 监听)属 U 域,
+重登录后 U1-U4 实测。

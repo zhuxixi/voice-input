@@ -7,9 +7,12 @@ tests assert argv directly; environment reads happen only in main().
 Safety contract (spec, pinned by test_paste.py): when XDG_SESSION_TYPE is
 unset or "x11", the delivered argv must stay byte-equivalent with the
 historical HEAD cdb9fbe line `xdotool type --clearmodifiers --delay 0 "$TEXT"`.
-Wayland sessions default to the clipboard-paste method (wl-copy + wtype
-ctrl+shift+v): immune to fcitx5 preedit capture of ASCII fragments, editor
-auto-close doubling and newline-as-Enter. Typing mode stays as a knob.
+Wayland sessions default to the clipboard-paste method (wl-copy + ydotool
+pressing the paste combo): immune to fcitx5 preedit capture of ASCII
+fragments, editor auto-close doubling and newline-as-Enter. ydotool replaces
+wtype because KWin (and Mutter) do not implement zwp_virtual_keyboard_v1
+(upstream wishlist bug 502882) — kernel-level uinput injection works on every
+Wayland compositor, X11 and the TTY alike. Typing mode stays as a knob.
 """
 
 import argparse
@@ -30,13 +33,13 @@ VALID_METHODS = ("paste", "type")
 
 def _wayland_type(combo, text):
     # combo unused for typing; kept for dispatch signature parity
-    return [{"argv": ["wtype", text], "stdin": None}]
+    return [{"argv": ["ydotool", "type", text], "stdin": None}]
 
 
 def _wayland_paste(combo, text):
     return [
         {"argv": ["wl-copy"], "stdin": text},
-        {"argv": ["wtype"] + combo_to_wtype_args(combo), "stdin": None},
+        {"argv": ["ydotool"] + combo_to_ydotool_args(combo), "stdin": None},
     ]
 
 
@@ -45,8 +48,27 @@ def _wayland_paste(combo, text):
 # for error messages and tests.
 _WAYLAND_DISPATCH = {"paste": _wayland_paste, "type": _wayland_type}
 
-# wtype(1) modifier whitelist (man page, verified against wtype 0.4).
-WTYPES_MODIFIERS = ("shift", "capslock", "ctrl", "logo", "win", "alt", "altgr")
+# evdev keycodes (linux/input-event-codes.h — stable kernel ABI), used to
+# translate the semantic paste combo into ydotool key events.
+_MOD_KEYCODES = {
+    "ctrl": 29, "shift": 42, "alt": 56, "altgr": 100,
+    "logo": 125, "win": 125, "capslock": 58,
+}
+_KEY_KEYCODES = {
+    # letters (qwerty positions, layout-independent at the evdev level)
+    "a": 30, "b": 48, "c": 46, "d": 32, "e": 18, "f": 33, "g": 34,
+    "h": 35, "i": 23, "j": 36, "k": 37, "l": 38, "m": 50, "n": 49,
+    "o": 24, "p": 25, "q": 16, "r": 19, "s": 31, "t": 20, "u": 22,
+    "v": 47, "w": 17, "x": 45, "y": 21, "z": 44,
+    "1": 2, "2": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9,
+    "9": 10, "0": 11,
+    "insert": 110, "delete": 111, "home": 102, "end": 107,
+    "pageup": 104, "pagedown": 109, "up": 103, "down": 108,
+    "left": 105, "right": 106, "enter": 28, "return": 28, "space": 57,
+    "tab": 15, "esc": 1, "escape": 1, "backspace": 14,
+    "f1": 59, "f2": 60, "f3": 61, "f4": 62, "f5": 63, "f6": 64,
+    "f7": 65, "f8": 66, "f9": 67, "f10": 68, "f11": 87, "f12": 88,
+}
 
 WAYLAND = "wayland"
 
@@ -55,61 +77,44 @@ WAYLAND = "wayland"
 # argv stays free of quoting/length concerns.
 
 
-def _plausible_key(name: str) -> bool:
-    """Plausible final combo component: single ASCII alnum char ("v", "V",
-    "5") or an xkb keysym-style Capitalized name ("Insert", "Home").
-    Multi-char lowercase words like "bogus" are rejected: they are almost
-    certainly a typo'd modifier, and wtype would fail on them at runtime
-    anyway — better to fail fast with a whitelist than deep inside xkb.
-    """
-    if not name:
-        return False
-    if len(name) == 1:
-        return name.isascii() and name.isalnum()
-    return name.isascii() and name[0].isupper() and name[1:].isalpha()
+def combo_to_ydotool_args(combo: str) -> list:
+    """Paste combo -> ydotool argument list (numeric keycodes, stable ABI).
 
-
-def combo_to_wtype_args(combo: str) -> list:
-    """Paste combo -> wtype argument list.
-
-    "ctrl+shift+v" -> ["-M","ctrl","-M","shift","-k","v","-m","shift","-m","ctrl"]:
+    "ctrl+shift+v" -> ["key","29:1","42:1","47:1","47:0","42:0","29:0"]:
     the last '+'-separated component is the key, the rest are modifiers;
     modifiers are pressed left-to-right and released in reverse (spec contract).
-    Unknown modifier or implausible key -> ValueError (fail fast: a typo'd
-    knob must not silently no-op the paste). wtype auto-releases modifiers
-    on exit, so the explicit trailing releases are redundant but keep the
-    sequence self-contained.
+    Unknown modifier or key -> ValueError (fail fast: a typo'd knob must not
+    silently no-op the paste).
     """
-    parts = [p for p in combo.split("+") if p]
+    parts = [p for p in combo.lower().split("+") if p]
     if not parts:
         raise ValueError(f"empty paste combo {combo!r}")
     key, mods = parts[-1], parts[:-1]
+    codes = []
     for m in mods:
-        if m not in WTYPES_MODIFIERS:
+        if m not in _MOD_KEYCODES:
             raise ValueError(
                 f"invalid modifier {m!r} in paste combo {combo!r}; "
-                f"valid modifiers: {', '.join(WTYPES_MODIFIERS)}"
+                f"valid modifiers: {', '.join(_MOD_KEYCODES)}"
             )
-    if not _plausible_key(key):
+        codes.append(f"{_MOD_KEYCODES[m]}:1")
+    kc = _KEY_KEYCODES.get(key, _MOD_KEYCODES.get(key))
+    if kc is None:
         raise ValueError(
-            f"invalid key {key!r} in paste combo {combo!r}; last component "
-            f"must be a key like 'v' or 'Insert', the rest must be modifiers "
-            f"from: {', '.join(WTYPES_MODIFIERS)}"
+            f"invalid key {key!r} in paste combo {combo!r}; the last "
+            f"component must be a key (a-z, 0-9, insert, enter, f1-f12, ...)"
         )
-    args = []
-    for m in mods:
-        args += ["-M", m]
-    args += ["-k", key]
+    codes += [f"{kc}:1", f"{kc}:0"]
     for m in reversed(mods):
-        args += ["-m", m]
-    return args
+        codes.append(f"{_MOD_KEYCODES[m]}:0")
+    return ["key"] + codes
 
 
 def paste_commands(session_type, method, combo, text):
     """Build the ordered command sequence delivering `text` to the focused window.
 
-    wayland + paste -> [wl-copy (text via stdin), wtype <paste combo>]
-    wayland + type  -> [wtype text]
+    wayland + paste -> [wl-copy (text via stdin), ydotool <paste combo>]
+    wayland + type  -> [ydotool type text]
     anything else (x11 / None / "" / unknown; method & combo are deliberately
     ignored there) -> xdotool argv byte-equivalent with HEAD cdb9fbe (spec D4):
     ["xdotool", "type", "--clearmodifiers", "--delay", "0", text]
@@ -206,7 +211,7 @@ def main(argv=None) -> int:
             print(
                 f"[voice-input] paste: required tool not found: "
                 f"{e.filename or e} — install it "
-                f"(pacman -S wl-clipboard wtype, or xdotool for X11)",
+                f"(pacman -S wl-clipboard ydotool, or xdotool for X11)",
                 file=sys.stderr,
             )
             return 3
