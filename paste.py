@@ -37,15 +37,30 @@ WAYLAND = "wayland"
 # argv stays free of quoting/length concerns.
 
 
+def _plausible_key(name: str) -> bool:
+    """Plausible final combo component: single ASCII alnum char ("v", "V",
+    "5") or an xkb keysym-style Capitalized name ("Insert", "Home").
+    Multi-char lowercase words like "bogus" are rejected: they are almost
+    certainly a typo'd modifier, and wtype would fail on them at runtime
+    anyway — better to fail fast with a whitelist than deep inside xkb.
+    """
+    if not name:
+        return False
+    if len(name) == 1:
+        return name.isascii() and name.isalnum()
+    return name.isascii() and name[0].isupper() and name[1:].isalpha()
+
+
 def combo_to_wtype_args(combo: str) -> list:
     """Paste combo -> wtype argument list.
 
     "ctrl+shift+v" -> ["-M","ctrl","-M","shift","-k","v","-m","shift","-m","ctrl"]:
     the last '+'-separated component is the key, the rest are modifiers;
     modifiers are pressed left-to-right and released in reverse (spec contract).
-    Unknown modifier -> ValueError (fail fast: a typo'd knob must not silently
-    no-op the paste). wtype auto-releases modifiers on exit, so the explicit
-    trailing releases are redundant but keep the sequence self-contained.
+    Unknown modifier or implausible key -> ValueError (fail fast: a typo'd
+    knob must not silently no-op the paste). wtype auto-releases modifiers
+    on exit, so the explicit trailing releases are redundant but keep the
+    sequence self-contained.
     """
     parts = [p for p in combo.split("+") if p]
     if not parts:
@@ -57,6 +72,12 @@ def combo_to_wtype_args(combo: str) -> list:
                 f"invalid modifier {m!r} in paste combo {combo!r}; "
                 f"valid modifiers: {', '.join(WTYPES_MODIFIERS)}"
             )
+    if not _plausible_key(key):
+        raise ValueError(
+            f"invalid key {key!r} in paste combo {combo!r}; last component "
+            f"must be a key like 'v' or 'Insert', the rest must be modifiers "
+            f"from: {', '.join(WTYPES_MODIFIERS)}"
+        )
     args = []
     for m in mods:
         args += ["-M", m]
