@@ -32,7 +32,15 @@ VALID_METHODS = ("paste", "type")
 
 
 def _wayland_type(combo, text):
-    # combo unused for typing; kept for dispatch signature parity
+    # combo unused for typing; kept for dispatch signature parity.
+    # CR finding 3: ydotool types through a keyboard mapping — CJK characters
+    # cannot be emitted at all and would be silently dropped; fail fast instead
+    if not text.isascii():
+        raise ValueError(
+            "wayland type method supports ASCII only (ydotool types via a "
+            "keymap; CJK would be silently dropped) — keep the default "
+            "paste method for Chinese text"
+        )
     return [{"argv": ["ydotool", "type", text], "stdin": None}]
 
 
@@ -50,8 +58,9 @@ _WAYLAND_DISPATCH = {"paste": _wayland_paste, "type": _wayland_type}
 
 # evdev keycodes (linux/input-event-codes.h — stable kernel ABI), used to
 # translate the semantic paste combo into ydotool key events.
+KEY_RIGHTALT = 100  # shared with voice_hold.py (single source, CR finding 9)
 _MOD_KEYCODES = {
-    "ctrl": 29, "shift": 42, "alt": 56, "altgr": 100,
+    "ctrl": 29, "shift": 42, "alt": 56, "altgr": KEY_RIGHTALT,
     "logo": 125, "win": 125, "capslock": 58,
 }
 _KEY_KEYCODES = {

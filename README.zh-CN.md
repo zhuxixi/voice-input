@@ -136,6 +136,7 @@ systemctl --user enable --now voice-hold.service
 - `VOICE_INPUT_WAYLAND_METHOD=type` 改为模拟打字（不动剪贴板），但输入法
   （fcitx5）处于激活态时英文片段可能被 preedit 吞掉——打字前先切到非激活态
   （`fcitx5-remote -c`），或保持默认粘贴方式。
+  注意 type 方式仅支持 ASCII（ydotool 经键盘映射打字）；非 ASCII 文本会被拒绝并提示改用 paste。
 - ydotool 在内核层注入，XWayland 窗口同样生效——但 `ydotoold` 必须在跑
   （`systemctl --user status ydotool`）。
 

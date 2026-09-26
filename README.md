@@ -154,6 +154,8 @@ Known limitations (Wayland):
   clipboard untouched), but with an active CJK input method (fcitx5) ASCII
   fragments may be swallowed by the preedit — keep the input method inactive
   while typing (`fcitx5-remote -c`) or prefer the default paste method.
+  Note the type method is ASCII-only (ydotool types through a keymap);
+  non-ASCII text is refused with an error pointing back to paste.
 - ydotool injects at the kernel level, so XWayland windows work too — but
   `ydotoold` must be running (`systemctl --user status ydotool`).
 

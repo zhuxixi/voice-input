@@ -27,7 +27,9 @@ VENV_PY = os.path.join(REPO_DIR, "venv", "bin", "python3")
 WAVFILE = "/tmp/voice-input-hold.wav"
 ENV_DEVICE = "VOICE_INPUT_DEVICE"
 
-KEY_RIGHTALT = 100  # evdev KEY_RIGHTALT (linux/input-event-codes.h, stable ABI)
+# KEY_RIGHTALT 单源在 paste.py(evdev KEY_RIGHTALT, linux/input-event-codes.h
+# 稳定 ABI);paste 顶层纯 stdlib,顶层 import 不破纯净性契约
+from paste import KEY_RIGHTALT  # noqa: F401  (re-exported for tests/callers)
 EV_KEY = 1          # event type for keys
 
 # Key event values (linux/input.h)
@@ -114,6 +116,16 @@ class _Overlay:
                 break
             time.sleep(0.05)
 
+    def _disable(self, where, e):
+        # CR 发现 2:静默禁用会让用户失去录音指示且查不到原因;hide 失败还要
+        # 兜底销毁,否则浮层永久留在屏幕上
+        print(f"[voice-hold] overlay disabled at {where}: {e}", file=sys.stderr)
+        self._ok = False
+        try:
+            self._win.destroy()
+        except Exception:
+            pass
+
     def show(self, text, color):
         if not self._ok:
             return
@@ -122,8 +134,8 @@ class _Overlay:
                 f"<span font='16' foreground='{color}'>{text}</span>")
             self._win.show_all()
             self._pump()
-        except Exception:
-            self._ok = False
+        except Exception as e:
+            self._disable("show", e)
 
     def hide(self, settle_s=0.0):
         if not self._ok:
@@ -132,8 +144,8 @@ class _Overlay:
             self._pump(settle_s)
             self._win.hide()
             self._pump()
-        except Exception:
-            self._ok = False
+        except Exception as e:
+            self._disable("hide", e)
 
 
 class HoldDaemon:
@@ -172,15 +184,22 @@ class HoldDaemon:
     def stop_recording(self):
         rec, self.rec_proc = self.rec_proc, None
         if rec is not None:
+            # 与 voice-ptt.py 同款分支日志(CR 发现 1):kill 后仍不退出的卡死
+            # 与普通失败必须可区分——静默吞掉会被 systemd Restart 放大成无诊断 crash-loop
             try:
                 rec.terminate()
                 rec.wait(timeout=2)
-            except Exception:
+            except subprocess.TimeoutExpired:
                 try:
                     rec.kill()
                     rec.wait(timeout=1)
-                except Exception:
-                    pass
+                except subprocess.TimeoutExpired:
+                    print("[voice-hold] arecord 在 kill 后仍未退出(可能残留占用音频设备)",
+                          file=sys.stderr)
+                except Exception as ke:
+                    print(f"[voice-hold] arecord kill failed: {ke}", file=sys.stderr)
+            except Exception as e:
+                print(f"[voice-hold] arecord stop failed: {e}", file=sys.stderr)
         if self._media_pause and self._paused:
             try:
                 self._media_pause.resume(self._paused)
@@ -196,9 +215,8 @@ class HoldDaemon:
             text = subprocess.check_output(
                 [VENV_PY, os.path.join(REPO_DIR, "transcribe_once.py"), WAVFILE],
                 stderr=sys.stderr, text=True).strip()
-        except subprocess.CalledProcessError as e:
-            print(f"[voice-hold] transcribe failed (exit {e.returncode})",
-                  file=sys.stderr)
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"[voice-hold] transcribe failed: {e}", file=sys.stderr)
             text = ""
         finally:
             if os.path.exists(WAVFILE):
@@ -224,7 +242,26 @@ class HoldDaemon:
         elif action == "stop":
             self.stop_recording()
 
+    def _preflight(self) -> list:
+        """启动预检(CR 发现 4/5):把所有「首次按键才会炸」的缺失提前到启动时报清。
+        返回缺失项描述列表,空 = 全部就绪。"""
+        import shutil
+        missing = []
+        if not os.path.isfile(VENV_PY):
+            missing.append(f"venv interpreter {VENV_PY} — see README Installation")
+        if shutil.which("arecord") is None:
+            missing.append("arecord — pacman -S alsa-utils")
+        for f in ("transcribe_once.py", "paste.py"):
+            if not os.path.isfile(os.path.join(REPO_DIR, f)):
+                missing.append(f"{f} missing under {REPO_DIR} — repo checkout broken?")
+        return missing
+
     def run(self) -> int:
+        missing = self._preflight()
+        if missing:
+            for m in missing:
+                print(f"[voice-hold] preflight: {m}", file=sys.stderr)
+            return 3
         try:
             import evdev
         except ImportError:

@@ -111,3 +111,19 @@ wtype 全退场,全链路走内核层(evdev 监听 + wl-copy + ydotool 注入)�
 
 测试:118 项全绿(104 + test_hold 14)。真执行链路(ydotool 注入 + evdev 监听)属 U 域,
 重登录后 U1-U4 实测。
+
+### 本地 CR 修正轮 2(A+ 代码,26→30 agents,2026-09-20 中午)
+
+10 条 CONFIRMED:修 7(1/2/3/4/5/6/9),延后 3(7/8/10,均需动保护文件 voice-ptt.py,记 #19)。
+
+| # | 发现 | 处置 |
+|---|------|------|
+| 1 | arecord kill 后 TimeoutExpired 被静默吞(voice-ptt 有日志,本文件退化) | ✅ 对齐 voice-ptt 三分支日志(超时/kill 失败/普通失败可区分) |
+| 2 | _Overlay show/hide 静默禁用;hide 失败浮层永久残留 | ✅ _disable() 带原因日志 + 兜底 destroy |
+| 3 | ydotool type 走键盘映射,CJK 根本打不出 → 静默丢字 | ✅ _wayland_type 非 ASCII fail-fast(ValueError→exit 3,指向 paste);单测钉死 |
+| 4+5 | venv/arecord 缺失在首次按键才炸,被 Restart=always 放大成无诊断 crash-loop | ✅ run() 启动预检 _preflight()(venv 解释器/arecord/transcribe_once.py/paste.py 四项,可行动 stderr 列出)+ 转写子进程 FileNotFoundError 兜底 |
+| 6 | voice-toggle.sh 注释还写 wtype | ✅ 同步 ydotool |
+| 9 | KEY_RIGHTALT=100 两处定义 | ✅ 单源到 paste.py(KEY_RIGHTALT 公开常量),voice_hold import;双文件测试互钉 |
+| 7/8/10 | _Overlay/录音生命周期/REPO_DIR 与 voice-ptt.py 副本化 | 📝 延后 #19(抽共享模块需动保护文件,与上屏统一/测试 helper/preamble 债务同池) |
+
+修正后:120 测试绿(新增 2);ASCII 守卫与预检冒烟均符合预期。

@@ -38,7 +38,7 @@ if [ -f "$PIDFILE" ]; then
     rm -f "$WAVFILE"
 
     if [ -n "$TEXT" ]; then
-        # 上屏分流走 paste.py(#18):wayland 粘贴(wl-copy+wtype)/直打,x11 保留
+        # 上屏分流走 paste.py(#18 v3):wayland 粘贴(wl-copy+ydotool)/直打,x11 保留
         # xdotool 现状。$VENV python(CR 发现 5:裸 python3 依赖 PATH,venv 已在
         # 上方预检保证存在)。退出码必检查(CR 发现 1/4):失败时 stderr 转成
         # 错误通知而非成功通知,transcript 不再静默丢失

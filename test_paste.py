@@ -108,6 +108,19 @@ class TestPasteCommands(unittest.TestCase):
         cmds = paste.paste_commands("wayland", "type", "ctrl+shift+v", "hi")
         self.assertEqual(cmds, [{"argv": ["ydotool", "type", "hi"], "stdin": None}])
 
+    def test_wayland_type_rejects_non_ascii(self):
+        # CR round-2 发现 3:ydotool 经键盘映射打字,CJK 根本无法输出——
+        # 静默丢字比报错恶劣,fail fast 指向 paste
+        with self.assertRaises(ValueError) as ctx:
+            paste.paste_commands("wayland", "type", "ctrl+shift+v", "你好")
+        self.assertIn("ASCII", str(ctx.exception))
+
+    def test_rightalt_single_source_with_voice_hold(self):
+        # CR round-2 发现 9:两处共享同一 keycode,单源在 paste.py
+        import voice_hold
+        self.assertEqual(voice_hold.KEY_RIGHTALT, paste.KEY_RIGHTALT)
+        self.assertEqual(paste.KEY_RIGHTALT, 100)
+
     def test_x11_fallthrough_variants(self):  # A2
         # x11 / None / empty / unknown (incl. case variants) all fall back to
         # the historical xdotool argv — method/combo must be ignored there
