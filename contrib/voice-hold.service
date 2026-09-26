@@ -1,0 +1,13 @@
+[Unit]
+Description=voice-input hold-to-talk daemon (hold Right Alt to dictate)
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/work/git-repo/voice-input/voice_hold.py
+Environment=VOICE_INPUT_ENGINE=cpu
+Environment=VOICE_INPUT_MODEL=small
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

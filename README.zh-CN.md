@@ -99,6 +99,47 @@ EOF
 
 将 `Exec` 路径改为实际安装路径。
 
+### Wayland（KDE）—— 按住说话（`voice_hold.py`）
+
+`voice-ptt.sh` / `voice-ptt.py` 依赖 `pynput` 与 `xdotool`（仅限 X11），而 KWin
+没有实现 wtype 所需的虚拟键盘协议（上游 wishlist bug 502882）——因此 Wayland 下
+整条链路改走内核层：**evdev 监听**（`voice_hold.py`）直接听真实键盘，**ydotool**
+（uinput 内核级注入）执行粘贴按键。任意 Wayland compositor、X11、乃至 TTY 都可用。
+
+**按住右 Alt → 说话 → 松开**——转写文本自动粘贴进当前焦点窗口（与 X11 按住说话
+节奏一致）。
+
+安装步骤：
+
+```bash
+sudo pacman -S --needed ydotool python-evdev python-gobject wl-clipboard alsa-utils
+systemctl --user enable --now ydotool.service   # 用户级守护;socket 在 $XDG_RUNTIME_DIR 下
+sudo usermod -aG input $USER                    # 监听器需要 /dev/input/* 访问权
+# 注销并重新登录（组成员资格只对新会话生效）
+mkdir -p ~/.config/systemd/user
+cp contrib/voice-hold.service ~/.config/systemd/user/   # 如有需要调整 ExecStart 路径
+systemctl --user enable --now voice-hold.service
+```
+
+- 守护日志：`journalctl --user -u voice-hold -f`。
+- 多键盘：监听器默认选第一个具备 KEY_RIGHTALT 能力的设备；可用
+  `VOICE_INPUT_DEVICE` 覆盖（`/dev/input/eventN` 路径或名称子串，大小写不敏感）。
+- 录音指示是一个置顶 GTK 小浮层（`● REC` / `DONE`）。Wayland 不允许客户端自己
+  定位窗口，浮层位置由 KWin 决定。
+- 如果之前给 `voice-toggle.sh` 绑过同键的 KDE 自定义快捷键，请删掉——否则会双触发。
+- `voice-toggle.sh` 仍是可用的「点两下」备选模式，走同一个后端。
+
+已知限制（Wayland）：
+
+- 文本落在**松开按键那一刻**的焦点窗口。
+- 粘贴方式会覆盖剪贴板——旧内容可从 Klipper 历史找回（`Meta+V`）。
+- `VOICE_INPUT_WAYLAND_METHOD=type` 改为模拟打字（不动剪贴板），但输入法
+  （fcitx5）处于激活态时英文片段可能被 preedit 吞掉——打字前先切到非激活态
+  （`fcitx5-remote -c`），或保持默认粘贴方式。
+  注意 type 方式仅支持 ASCII（ydotool 经键盘映射打字）；非 ASCII 文本会被拒绝并提示改用 paste。
+- ydotool 在内核层注入，XWayland 窗口同样生效——但 `ydotoold` 必须在跑
+  （`systemctl --user status ydotool`）。
+
 ## 配置
 
 所有配置项、默认值与修改方式：
@@ -108,6 +149,8 @@ EOF
 | `VOICE_INPUT_ARCHIVE` | `1`（开） | 每次录音归档（音频 + 转写文本）到 `~/.local/share/voice-input/recordings/`（每条一目录 + `index.jsonl` 索引） | `VOICE_INPUT_ARCHIVE=0 ./voice-ptt.sh` |
 | `VOICE_INPUT_PAUSE_MEDIA` | `1`（开） | 录音时自动暂停 MPRIS 播放器（Chrome 等），松手后恢复 | `VOICE_INPUT_PAUSE_MEDIA=0 ./voice-ptt.sh` |
 | `~/.config/voice-input/terms.json` | （无） | 自定义词汇热词，见下 | 编辑该文件 |
+| `VOICE_INPUT_WAYLAND_METHOD` | `paste` | Wayland 上屏方式：`paste` = 剪贴板粘贴（`wl-copy` + `ydotool` 组合键），`type` = 模拟打字 | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_WAYLAND_METHOD=type` |
+| `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | paste 方式的组合键（终端惯例；VS Code 等只认 `ctrl+v` 的应用改这个） | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_PASTE_COMBO=ctrl+v` |
 
 ### 自定义词汇（热词）
 
@@ -151,9 +194,11 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 | `archive.py` | 录音归档（音频 + 转写文本存到 `~/.local/share/voice-input/recordings/`，含 `index.jsonl` 索引） |
 | `media_pause.py` | 录音时自动暂停/恢复 MPRIS 媒体（Chrome 等），走系统 D-Bus，零依赖 |
 | `voice-toggle.sh` | 切换模式脚本（按一下开始，再按一下停止并输入） |
+| `paste.py` | 上屏分流：构造 wayland（ydotool）/ x11（xdotool）上屏命令序列（按会话类型分流，#18） |
+| `voice_hold.py` / `contrib/voice-hold.service` | Wayland 按住说话守护（evdev 监听 + GTK 指示浮层）及其 systemd user 单元（#18） |
 | `test-mic.sh` | 麦克风测试 |
 | `download-model.sh` / `download-model.py` | 模型下载（hf-mirror.com 镜像 + DoH DNS 修复，绕过 DNS 污染） |
-| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` | 单元测试（标准库 unittest） |
+| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` / `test_paste.py` / `test_hold.py` | 单元测试（标准库 unittest） |
 | `bench/` | NPU/CPU 转写基准工具与结果留档（`npu-bench.py`，#17） |
 | `docs/` | 设计文档（以中文为主；较新的 `superpowers/` 计划为英文） |
 
@@ -223,7 +268,7 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 ## 测试
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause test_bench -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold -v
 ```
 
 测试仅用标准库，不依赖 GPU。

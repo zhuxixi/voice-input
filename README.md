@@ -111,6 +111,54 @@ EOF
 
 Adjust the `Exec` path to your actual install location.
 
+### Wayland (KDE) — hold-to-talk via `voice_hold.py`
+
+`voice-ptt.sh` / `voice-ptt.py` rely on `pynput` + `xdotool` (X11-only), and
+KWin does not implement the virtual-keyboard protocol that `wtype` needs
+(upstream wishlist bug 502882) — so on Wayland everything runs at the kernel
+level instead: an **evdev listener** (`voice_hold.py`) watches the real
+keyboard and **ydotool** (uinput) performs the paste keystroke. Works on any
+Wayland compositor, X11 and even the TTY.
+
+**Hold Right Alt → speak → release** — the transcript is pasted into the
+focused window (same rhythm as X11 push-to-talk).
+
+Setup:
+
+```bash
+sudo pacman -S --needed ydotool python-evdev python-gobject wl-clipboard alsa-utils
+systemctl --user enable --now ydotool.service   # user daemon; socket under $XDG_RUNTIME_DIR
+sudo usermod -aG input $USER                    # /dev/input/* access for the listener
+# log out and back in (group membership applies to new sessions only)
+mkdir -p ~/.config/systemd/user
+cp contrib/voice-hold.service ~/.config/systemd/user/   # adjust ExecStart path if needed
+systemctl --user enable --now voice-hold.service
+```
+
+- Daemon logs: `journalctl --user -u voice-hold -f`.
+- Multiple keyboards: the listener picks the first device exposing KEY_RIGHTALT;
+  override with `VOICE_INPUT_DEVICE` (a `/dev/input/eventN` path or a
+  case-insensitive name substring).
+- The recording indicator is a small always-on-top GTK window (`● REC` / `DONE`).
+  Wayland does not let clients position windows, so KWin chooses the placement.
+- If you created a KDE custom shortcut for `voice-toggle.sh` on the same key,
+  delete it — otherwise both fire.
+- `voice-toggle.sh` still works as a tap-twice alternative via the same backend.
+
+Known limitations (Wayland):
+
+- The transcript lands wherever the focus is when you RELEASE the key.
+- The paste method overwrites the clipboard — recover previous contents from
+  the Klipper history (`Meta+V`).
+- `VOICE_INPUT_WAYLAND_METHOD=type` types instead of pasting (keeps the
+  clipboard untouched), but with an active CJK input method (fcitx5) ASCII
+  fragments may be swallowed by the preedit — keep the input method inactive
+  while typing (`fcitx5-remote -c`) or prefer the default paste method.
+  Note the type method is ASCII-only (ydotool types through a keymap);
+  non-ASCII text is refused with an error pointing back to paste.
+- ydotool injects at the kernel level, so XWayland windows work too — but
+  `ydotoold` must be running (`systemctl --user status ydotool`).
+
 ## Configuration
 
 All settings with their defaults and how to change them:
@@ -120,6 +168,8 @@ All settings with their defaults and how to change them:
 | `VOICE_INPUT_ARCHIVE` | `1` (on) | Archive each recording (audio + transcript) to `~/.local/share/voice-input/recordings/` (one directory per recording + an `index.jsonl` index) | `VOICE_INPUT_ARCHIVE=0 ./voice-ptt.sh` |
 | `VOICE_INPUT_PAUSE_MEDIA` | `1` (on) | Auto-pause MPRIS players (Chrome etc.) while recording, resume after release | `VOICE_INPUT_PAUSE_MEDIA=0 ./voice-ptt.sh` |
 | `~/.config/voice-input/terms.json` | (none) | Custom vocabulary hotwords, see below | Edit the file |
+| `VOICE_INPUT_WAYLAND_METHOD` | `paste` | Wayland text delivery: `paste` = clipboard paste (`wl-copy` + `ydotool` combo), `type` = simulated typing | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_WAYLAND_METHOD=type` |
+| `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | Paste key combo for the Wayland paste method (terminal convention; use `ctrl+v` for apps like VS Code that only bind plain paste) | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_PASTE_COMBO=ctrl+v` |
 
 ### Custom vocabulary (hotwords)
 
@@ -174,9 +224,11 @@ Use `arecord -l` only to troubleshoot raw devices, not to pick the capture devic
 | `archive.py` | Archives each recording (audio + transcript) under `~/.local/share/voice-input/recordings/` with an `index.jsonl` index |
 | `media_pause.py` | Pauses/resumes MPRIS media via D-Bus; zero extra dependencies |
 | `voice-toggle.sh` | Alternative toggle mode: press once to start, press again to stop and type |
+| `paste.py` | Text delivery: builds the wayland (ydotool) / x11 (xdotool) paste command sequence (session-aware, #18) |
+| `voice_hold.py` / `contrib/voice-hold.service` | Wayland hold-to-talk daemon (evdev listener + GTK indicator) and its systemd user unit (#18) |
 | `test-mic.sh` | Microphone test |
 | `download-model.sh` / `download-model.py` | Model download (hf-mirror.com mirror + DoH DNS workaround for polluted DNS) |
-| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` | Unit tests (stdlib `unittest`) |
+| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` / `test_paste.py` / `test_hold.py` | Unit tests (stdlib `unittest`) |
 | `bench/` | NPU/CPU transcription benchmark tool + archived results (`npu-bench.py`, #17) |
 | `docs/` | Design documents (mostly Chinese; the newer `superpowers/` plans are English) |
 
@@ -254,7 +306,7 @@ The author's setup, for reference:
 ## Testing
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause test_bench -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold -v
 ```
 
 The tests use only the standard library and don't touch the GPU.
