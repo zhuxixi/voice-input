@@ -23,20 +23,32 @@ class TestStateMachine(unittest.TestCase):
     """A7: press/release/repeat transitions."""
 
     def test_press_starts_recording(self):
-        self.assertEqual(voice_hold.transition(1, False), (True, "start"))
+        self.assertEqual(voice_hold.transition(1, False), (True, False, "start"))
 
     def test_release_stops_recording(self):
-        self.assertEqual(voice_hold.transition(0, True), (False, "stop"))
+        self.assertEqual(voice_hold.transition(0, True), (False, False, "stop"))
 
     def test_repeat_ignored_while_holding(self):
-        self.assertEqual(voice_hold.transition(2, True), (True, None))
-        self.assertEqual(voice_hold.transition(2, False), (False, None))
+        self.assertEqual(voice_hold.transition(2, True), (True, False, None))
+        self.assertEqual(voice_hold.transition(2, False), (False, False, None))
 
     def test_redundant_press_while_recording_ignored(self):
-        self.assertEqual(voice_hold.transition(1, True), (True, None))
+        self.assertEqual(voice_hold.transition(1, True), (True, False, None))
 
     def test_release_without_recording_ignored(self):
-        self.assertEqual(voice_hold.transition(0, False), (False, None))
+        self.assertEqual(voice_hold.transition(0, False), (False, False, None))
+
+    def test_press_while_busy_dropped(self):
+        # Zima round-3 发现 1:转写管线期间到达的按键必须被即时消费丢弃,
+        # 否则被单线程 read_loop 缓冲成迟到的幽灵录音、语音静默丢失
+        for value in (1, 0, 2):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    voice_hold.transition(value, False, busy=True),
+                    (False, True, None))
+                self.assertEqual(
+                    voice_hold.transition(value, True, busy=True),
+                    (True, True, None))
 
 
 class TestDevicePredicate(unittest.TestCase):
@@ -103,6 +115,22 @@ class TestPickDevice(unittest.TestCase):
         self.assertEqual(dev.path, "/dev/input/event9")
 
 
+class TestOverlayLazyInit(unittest.TestCase):
+    """Zima round-3 发现 3:浮层 GTK 延迟到首次 show;构造必须零 GTK 副作用。"""
+
+    def test_construction_touches_no_gtk(self):
+        code = ("import sys, voice_hold; "
+                "o = voice_hold._Overlay(); "
+                "print(o._win, o._inited, 'gi' in sys.modules)")
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=REPO, capture_output=True,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        self.assertEqual(proc.stdout.decode().strip(), "None False False")
+
+
 class TestModulePurity(unittest.TestCase):
     """A9: import must stay stdlib-only (no evdev/gi needed at import time)."""
 
@@ -115,7 +143,7 @@ class TestModulePurity(unittest.TestCase):
             env={"PATH": "/usr/bin:/bin"},  # no evdev/gi on path isolation
         )
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
-        self.assertIn("100 (True, 'start')", proc.stdout.decode())
+        self.assertIn("100 (True, False, 'start')", proc.stdout.decode())
 
 
 if __name__ == "__main__":

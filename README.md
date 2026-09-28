@@ -139,8 +139,12 @@ systemctl --user enable --now voice-hold.service
 - Multiple keyboards: the listener picks the first device exposing KEY_RIGHTALT;
   override with `VOICE_INPUT_DEVICE` (a `/dev/input/eventN` path or a
   case-insensitive name substring).
-- The recording indicator is a small always-on-top GTK window (`● REC` / `DONE`).
-  Wayland does not let clients position windows, so KWin chooses the placement.
+- The recording indicator is a small always-on-top GTK window (`● REC`),
+  initialized lazily so a session-env race cannot lose it. Wayland does not let
+  clients position windows, so KWin chooses the placement. There is no DONE
+  indicator: the transcript landing in the focused window is the completion
+  signal (delivery runs on a worker thread; keypresses during transcription
+  are dropped, not queued).
 - If you created a KDE custom shortcut for `voice-toggle.sh` on the same key,
   delete it — otherwise both fire.
 - `voice-toggle.sh` still works as a tap-twice alternative via the same backend.
@@ -157,7 +161,21 @@ Known limitations (Wayland):
   Note the type method is ASCII-only (ydotool types through a keymap);
   non-ASCII text is refused with an error pointing back to paste.
 - ydotool injects at the kernel level, so XWayland windows work too — but
-  `ydotoold` must be running (`systemctl --user status ydotool`).
+  `ydotoold` must be running (`systemctl --user status ydotool`). If the
+  client reports "unable to connect socket", the packaged daemon listens on a
+  different default path — add a drop-in
+  `~/.config/systemd/user/ydotool.service.d/socket-path.conf`:
+
+  ```ini
+  [Service]
+  ExecStart=
+  ExecStart=/usr/bin/ydotoold -p /run/user/%U/.ydotool_socket
+  ```
+
+  then `systemctl --user daemon-reload && systemctl --user restart ydotool`.
+- Transcription is bounded by `VOICE_INPUT_TRANSCRIBE_TIMEOUT` (default 120s):
+  a hung child is killed and the hotkey keeps working instead of freezing
+  forever.
 
 ## Configuration
 

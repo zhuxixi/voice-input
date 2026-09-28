@@ -124,8 +124,10 @@ systemctl --user enable --now voice-hold.service
 - 守护日志：`journalctl --user -u voice-hold -f`。
 - 多键盘：监听器默认选第一个具备 KEY_RIGHTALT 能力的设备；可用
   `VOICE_INPUT_DEVICE` 覆盖（`/dev/input/eventN` 路径或名称子串，大小写不敏感）。
-- 录音指示是一个置顶 GTK 小浮层（`● REC` / `DONE`）。Wayland 不允许客户端自己
-  定位窗口，浮层位置由 KWin 决定。
+- 录音指示是一个置顶 GTK 小浮层（`● REC`），惰性初始化（会话环境晚就绪也不会
+  丢失指示）。Wayland 不允许客户端自己定位窗口，浮层位置由 KWin 决定。没有
+  DONE 指示：转写文本落进焦点窗口本身就是完成信号（投递在工作线程跑；转写
+  期间的新按键被丢弃，不排队）。
 - 如果之前给 `voice-toggle.sh` 绑过同键的 KDE 自定义快捷键，请删掉——否则会双触发。
 - `voice-toggle.sh` 仍是可用的「点两下」备选模式，走同一个后端。
 
@@ -138,7 +140,19 @@ systemctl --user enable --now voice-hold.service
   （`fcitx5-remote -c`），或保持默认粘贴方式。
   注意 type 方式仅支持 ASCII（ydotool 经键盘映射打字）；非 ASCII 文本会被拒绝并提示改用 paste。
 - ydotool 在内核层注入，XWayland 窗口同样生效——但 `ydotoold` 必须在跑
-  （`systemctl --user status ydotool`）。
+  （`systemctl --user status ydotool`）。若客户端报 "unable to connect socket"，
+  是发行包守护的默认 socket 路径与客户端不一致——加 drop-in
+  `~/.config/systemd/user/ydotool.service.d/socket-path.conf`：
+
+  ```ini
+  [Service]
+  ExecStart=
+  ExecStart=/usr/bin/ydotoold -p /run/user/%U/.ydotool_socket
+  ```
+
+  然后 `systemctl --user daemon-reload && systemctl --user restart ydotool`。
+- 转写受 `VOICE_INPUT_TRANSCRIBE_TIMEOUT`（默认 120 秒）约束：挂死的子进程会被
+  杀掉，热键继续可用而不是永久冻结。
 
 ## 配置
 

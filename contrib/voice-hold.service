@@ -1,13 +1,19 @@
 [Unit]
 Description=voice-input hold-to-talk daemon (hold Right Alt to dictate)
+# Zima CR round-3 发现 3:After= 不带 WantedBy 的目标不会建立顺序,daemon 在
+# WAYLAND_DISPLAY 导出前启动 → GTK 浮层终身丢失。规范接法:挂到
+# graphical-session.target(KDE systemd 启动时会激活它并 import 环境);
+# 浮层本身也做了惰性初始化双保险。
+PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
 ExecStart=/usr/bin/python3 %h/work/git-repo/voice-input/voice_hold.py
 Environment=VOICE_INPUT_ENGINE=cpu
 Environment=VOICE_INPUT_MODEL=small
+Environment=VOICE_INPUT_TRANSCRIBE_TIMEOUT=120
 Restart=always
 RestartSec=3
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

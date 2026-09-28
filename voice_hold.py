@@ -20,6 +20,7 @@ root:input by default). Needs a re-login after `usermod -aG input $USER`.
 import os
 import subprocess
 import sys
+import threading
 import time
 
 REPO_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -46,17 +47,23 @@ def is_keyboard_device(name: str, key_codes) -> bool:
     return KEY_RIGHTALT in key_codes
 
 
-def transition(value: int, recording: bool):
+def transition(value: int, recording: bool, busy: bool = False):
     """State machine (pure): evdev key value + current state ->
-    (new_state, action) with action in {None, "start", "stop"}.
+    (new_recording, new_busy, action) with action in {None, "start", "stop"}.
+
+    busy = 转写/上屏管线仍在工作线程里跑(Zima CR round-3 发现 1):期间到达的
+    按键一律丢弃——单线程 read_loop 会把它们缓冲到管线返回后才处理,导致
+    「迟到开始录音 + 语音静默丢失」;忙态显式丢弃则事件被即时消费,不残留。
     Autorepeat (value 2) and redundant press/release are ignored."""
+    if busy:
+        return recording, True, None
     if value == _REPEAT:
-        return recording, None
+        return recording, False, None
     if value == _PRESS and not recording:
-        return True, "start"
+        return True, False, "start"
     if value == _RELEASE and recording:
-        return False, "stop"
-    return recording, None
+        return False, False, "stop"
+    return recording, False, None
 
 
 def pick_device(evdev, wanted: str = None):
@@ -86,9 +93,18 @@ class _Overlay:
     """
 
     def __init__(self):
-        self._ok = False
+        # 惰性初始化(Zima CR round-3 发现 3 + systemd 排序):GTK 延后到首次
+        # show()——daemon 在 graphical-session 环境就绪前启动时,监听照常工作,
+        # 浮层等会话环境到位后的第一次录音再初始化;初始化失败每次录音重试
+        self._inited = False
+        self._dead = False
         self._win = None
         self._label = None
+        self._Gtk = None
+
+    def _try_init(self):
+        if self._inited or self._dead:
+            return
         try:
             import gi
             gi.require_version("Gtk", "3.0")
@@ -102,9 +118,9 @@ class _Overlay:
             self._label = Gtk.Label()
             win.add(self._label)
             self._win = win
-            self._ok = True
+            self._inited = True
         except Exception as e:
-            print(f"[voice-hold] overlay disabled (GTK unavailable): {e}",
+            print(f"[voice-hold] overlay unavailable (retry next recording): {e}",
                   file=sys.stderr)
 
     def _pump(self, seconds=0.0):
@@ -117,17 +133,21 @@ class _Overlay:
             time.sleep(0.05)
 
     def _disable(self, where, e):
-        # CR 发现 2:静默禁用会让用户失去录音指示且查不到原因;hide 失败还要
-        # 兜底销毁,否则浮层永久留在屏幕上
+        # 本地 CR 发现 2:静默禁用会让用户失去录音指示且查不到原因;hide 失败
+        # 还要兜底销毁,否则浮层永久留在屏幕上
         print(f"[voice-hold] overlay disabled at {where}: {e}", file=sys.stderr)
-        self._ok = False
+        self._dead = True
         try:
             self._win.destroy()
         except Exception:
             pass
 
     def show(self, text, color):
-        if not self._ok:
+        if self._dead:
+            return
+        if not self._inited:
+            self._try_init()
+        if not self._inited:
             return
         try:
             self._label.set_markup(
@@ -138,7 +158,7 @@ class _Overlay:
             self._disable("show", e)
 
     def hide(self, settle_s=0.0):
-        if not self._ok:
+        if self._dead or not self._inited:
             return
         try:
             self._pump(settle_s)
@@ -155,6 +175,7 @@ class HoldDaemon:
     def __init__(self, env=None):
         self.env = dict(os.environ if env is None else env)
         self.recording = False
+        self.busy = False
         self.rec_proc = None
         self.overlay = _Overlay()
         self._paused = []
@@ -182,6 +203,9 @@ class HoldDaemon:
         print("[voice-hold] recording...", flush=True)
 
     def stop_recording(self):
+        """同步快停(毫秒~2.5s 级):杀录音、恢复媒体、藏浮层;转写+上屏交给
+        工作线程(Zima CR round-3 发现 1),read_loop 继续消费事件——忙态期间
+        的新按键由 transition 丢弃,不会被 evdev 缓冲成迟到的幽灵录音。"""
         rec, self.rec_proc = self.rec_proc, None
         if rec is not None:
             # 与 voice-ptt.py 同款分支日志(CR 发现 1):kill 后仍不退出的卡死
@@ -207,36 +231,67 @@ class HoldDaemon:
                 print(f"[voice-hold] resume_media failed: {e}", file=sys.stderr)
             self._paused = []
         self.overlay.hide()
-        time.sleep(0.3)  # let arecord finish flushing the wav (mirrors voice-ptt)
-        if not os.path.exists(WAVFILE) or os.path.getsize(WAVFILE) < 1000:
-            print("[voice-hold] recording empty/too short (<1KB)", file=sys.stderr)
-            return
+        self.busy = True
+        threading.Thread(target=self._deliver, daemon=True).start()
+
+    def _deliver(self):
+        """工作线程:转写 + 上屏(带超时,Zima CR round-3 发现 2——挂死的子进程
+        必须被杀掉,busy 必须总能回到 False,否则热键一次性永久失效)。
+        注意本函数不触碰 GTK(工作线程非 GTK 主线程)。"""
         try:
-            text = subprocess.check_output(
-                [VENV_PY, os.path.join(REPO_DIR, "transcribe_once.py"), WAVFILE],
-                stderr=sys.stderr, text=True).strip()
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            print(f"[voice-hold] transcribe failed: {e}", file=sys.stderr)
-            text = ""
+            time.sleep(0.3)  # let arecord finish flushing the wav (mirrors voice-ptt)
+            if not os.path.exists(WAVFILE) or os.path.getsize(WAVFILE) < 1000:
+                print("[voice-hold] recording empty/too short (<1KB)",
+                      file=sys.stderr)
+                return
+            try:
+                text = subprocess.check_output(
+                    [VENV_PY, os.path.join(REPO_DIR, "transcribe_once.py"),
+                     WAVFILE],
+                    stderr=sys.stderr, text=True,
+                    timeout=self._transcribe_timeout()).strip()
+            except subprocess.TimeoutExpired:
+                print("[voice-hold] transcribe timed out (hung child killed) — "
+                      "raise VOICE_INPUT_TRANSCRIBE_TIMEOUT if the model "
+                      "legitimately needs longer", file=sys.stderr)
+                text = ""
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print(f"[voice-hold] transcribe failed: {e}", file=sys.stderr)
+                text = ""
+            finally:
+                if os.path.exists(WAVFILE):
+                    os.unlink(WAVFILE)
+            if not text:
+                print("[voice-hold] no speech recognized", flush=True)
+                return
+            try:
+                proc = subprocess.run(
+                    [sys.executable, os.path.join(REPO_DIR, "paste.py")],
+                    input=text.encode(), stderr=subprocess.PIPE, timeout=30)
+            except subprocess.TimeoutExpired:
+                print("[voice-hold] paste timed out (hung child killed) — "
+                      "is ydotoold responsive?", file=sys.stderr)
+                return
+            if proc.returncode != 0:
+                print(f"[voice-hold] paste failed: "
+                      f"{proc.stderr.decode(errors='replace')}", file=sys.stderr)
+                return
+            print(f"[voice-hold] delivered: {text}", flush=True)
         finally:
-            if os.path.exists(WAVFILE):
-                os.unlink(WAVFILE)
-        if not text:
-            print("[voice-hold] no speech recognized", flush=True)
-            return
-        proc = subprocess.run(
-            [sys.executable, os.path.join(REPO_DIR, "paste.py")],
-            input=text.encode(), stderr=subprocess.PIPE)
-        if proc.returncode != 0:
-            print(f"[voice-hold] paste failed: "
-                  f"{proc.stderr.decode(errors='replace')}", file=sys.stderr)
-            return
-        print(f"[voice-hold] delivered: {text}", flush=True)
-        self.overlay.show("DONE", "#4fc3f7")
-        self.overlay.hide(settle_s=1.2)
+            self.busy = False
+
+    def _transcribe_timeout(self) -> float:
+        raw = self.env.get("VOICE_INPUT_TRANSCRIBE_TIMEOUT", "120")
+        try:
+            return max(1.0, float(raw))
+        except ValueError:
+            print(f"[voice-hold] bad VOICE_INPUT_TRANSCRIBE_TIMEOUT {raw!r}, "
+                  "using 120", file=sys.stderr)
+            return 120.0
 
     def handle_key_value(self, value: int):
-        self.recording, action = transition(value, self.recording)
+        self.recording, self.busy, action = transition(
+            value, self.recording, self.busy)
         if action == "start":
             self.start_recording()
         elif action == "stop":
