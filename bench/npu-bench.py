@@ -20,9 +20,9 @@ import signal
 import sys
 import time
 
-# OmniBook(Arch + AUR intel-npu-driver-bin)上 OpenVINO 枚举 NPU 的前置:
-# ze 驱动库目录须在 LD_LIBRARY_PATH(否则 available_devices 只有 CPU)。
-NPU_LIB_DIR = "/usr/lib/x86_64-linux-gnu"
+# engine.py 在仓库根目录(bench/ 上一级);顶层纯标准库,import 不破纯度契约
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+import engine
 
 
 def parse_args(argv: list) -> argparse.Namespace:
@@ -55,29 +55,6 @@ def parse_args(argv: list) -> argparse.Namespace:
         p.error(f"unsupported --device {ns.device!r} (use cpu or npu)")
     ns.device = dev
     return ns
-
-
-def _lib_dir_present(path: str) -> bool:
-    """共享谓词:LD_LIBRARY_PATH 是否已含 NPU 库目录(按分量精确匹配)。
-
-    单一定义点,set_npu_library_path 与 needs_reexec_for_npu 共用——避免
-    startswith 前缀匹配与 split(':') 分量匹配语义发散(CR 发现 2/9:
-    兄弟目录 /usr/lib/x86_64-linux-gnu-extras 会让两者判定相反,re-exec 空转)。
-    """
-    return NPU_LIB_DIR in [p for p in path.split(os.pathsep) if p]
-
-
-def set_npu_library_path(env: dict) -> str:
-    """在注入的 env dict 上前插 NPU 驱动库目录到 LD_LIBRARY_PATH,返回新值。
-
-    只操作传入的 dict(单测可注入临时 dict,不污染 os.environ);
-    幂等:已含(分量精确匹配)时原样返回,不重复拼接。
-    """
-    old = env.get("LD_LIBRARY_PATH", "")
-    if _lib_dir_present(old):
-        return old
-    env["LD_LIBRARY_PATH"] = f"{NPU_LIB_DIR}{os.pathsep}{old}" if old else NPU_LIB_DIR
-    return env["LD_LIBRARY_PATH"]
 
 
 def format_report(metrics: dict) -> str:
@@ -157,10 +134,11 @@ def needs_reexec_for_npu(env: dict) -> bool:
     背景:A/B 实测(2026-09-19)进程内改 os.environ['LD_LIBRARY_PATH'] 对 ld.so 无效
     (动态链接器只在进程启动读一次)——NPU 枚举要求启动时已含驱动库目录,
     缺失时由 main() 带正确 env 重新 exec 自身一次。
+    路径判定收敛到 engine.has_library_paths(#19);哨兵语义不变。
     """
     if env.get("_NPU_BENCH_REEXEC"):
         return False
-    return not _lib_dir_present(env.get("LD_LIBRARY_PATH", ""))
+    return not engine.has_library_paths(env, engine.required_lib_paths("npu"))
 
 
 def reexec_command(argv: list, script_path: str) -> list:
@@ -186,7 +164,7 @@ def run_bench(model_dir: str, device: str, wav: str, runs: int = 3,
     文本、置 any_run_timeout=true(超预算标记),不伪造 first_transcribe_s、
     不丢弃结果;真死锁由 main() 的 fork 看门狗兑底(父进程 kill 子进程)。
     """
-    set_npu_library_path(os.environ)  # NPU 枚举前置(本机已验证的坑)
+    engine.prepend_library_path(os.environ, engine.required_lib_paths("npu"))  # NPU 枚举前置
 
     from openvino_genai import WhisperPipeline  # 懒导入(纯度契约)
 
@@ -332,7 +310,7 @@ def main(argv: list = None) -> int:
         # 运行中修改无效;哨兵防循环;argv 用调用方显式传入的,防宿主
         # sys.argv 误 exec 无关工具,CR 发现 3)
         env = dict(os.environ)
-        set_npu_library_path(env)
+        engine.prepend_library_path(env, engine.required_lib_paths("npu"))
         env["_NPU_BENCH_REEXEC"] = "1"
         os.execve(sys.executable, reexec_command(
             argv if argv is not None else sys.argv[1:],
