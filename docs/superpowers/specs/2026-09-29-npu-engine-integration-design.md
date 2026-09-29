@@ -51,7 +51,7 @@
 1. **Adapter 适配器**（已选，备选见 issue 设计讨论）：`build_model("npu")` 返回 duck-typing 兼容 faster-whisper 的 `_NpuWhisperAdapter`，调用方零改动。签名兼容由单测钉死（A3）。
 2. **模型名映射**：新增 `default_model(engine) -> str` 单点（npu→`small-int8-ov`，其他→`large-v3` 契约默认不变），build_model 与两处 shell 预检共用；不设 VOICE_INPUT_MODEL 时 npu 不会错找不存在的 `OpenVINO/whisper-large-v3`。映射 HF repo `OpenVINO/whisper-small-int8-ov` → `models--OpenVINO--whisper-small-int8-ov/snapshots/`；快照谓词 `openvino_encoder_model.xml`。非 npu 引擎的解析逻辑逐字不变。
 3. **CACHE_DIR** 固定 `~/.cache/voice-input/npu-compile-cache`（expanduser，无 env knob）。
-4. **环境注入分层**：engine.py 单点计算 → voice_hold Popen env（service 文件无需 LD_LIBRARY_PATH 行）/ shell wrappers export / transcribe_once 裸调缺路径时给可行动报错（不做 re-exec）。**cpu 惰性差异声明**：现状 wrapper/transcribe_once 无条件设置 nvidia 路径，收敛后 engine=cpu 时不再设置——功能惰性（CPU 推理不依赖 cublas/cudnn，无 N 卡机器上这些路径本就不存在），7700K 默认 cuda 零影响；A6/A8 的「等价」限定于 cuda/auto 分支
+4. **环境注入分层**：engine.py 单点计算 → voice_hold 经 `engine.child_env()`（npu 时注入 NPU 路径，其他引擎原样拷贝由 transcribe_once 进程内 preamble 维持现状——voice_hold 不碰 venv site 探测）/ shell wrappers export / transcribe_once 裸调缺路径时给可行动报错（不做 re-exec）。**cpu 惰性差异声明**：现状 wrapper/transcribe_once 无条件设置 nvidia 路径，收敛后 engine=cpu 时不再设置——功能惰性（CPU 推理不依赖 cublas/cudnn，无 N 卡机器上这些路径本就不存在），7700K 默认 cuda 零影响；A6/A8 的「等价」限定于 cuda/auto 分支。**prepend 幂等差异声明**：父环境已含目标路径时 prepend 去重不重复拼接（HEAD 会重复追加）——ld.so 对重复分量语义等价，属惰性差异
 5. **热词降级**：adapter 每次转写检查 initial_prompt/hotwords，非空则 stderr 告警一行后忽略。
 6. **上屏不统一**（裁决修正）：voice-ptt.py 上屏段一行不动；统一债挂账。
 
@@ -80,6 +80,11 @@ def default_model(engine: str) -> str
     # 引擎感知的默认模型名单点：npu -> "small-int8-ov"，其他 -> "large-v3"（#16 契约不动）
     # build_model 与 shell 预检共用，防 npu 无 MODEL 时错找不存在的 repo
 
+def child_env(env: dict) -> dict
+    # spawn transcribe 子进程用的 env：npu 时 prepend NPU 库路径（ld.so 进程启动前置），
+    # 其他引擎/非法引擎原样拷贝放行（由 transcribe_once 进程内 preamble / 可行动报错维持现状）。
+    # 纯函数，voice_hold 唯一注入点
+
 def ov_snapshots_base(model: str) -> str
     # expanduser(f"~/.cache/huggingface/hub/models--OpenVINO--whisper-{model}/snapshots")
 
@@ -98,7 +103,7 @@ class _NpuWhisperAdapter:
     # initial_prompt/hotwords 非 None -> stderr warn 一行(含原因),继续转写
 ```
 
-`build_model`：npu 分支替换两处 NotImplementedError（construction_kwargs 的 npu 分支改 ValueError——见 Open decisions #3）；model=None 时取 `default_model("npu")`，resolve_model_path 用 ov 布局。
+`build_model`：npu 分支替换两处 NotImplementedError（construction_kwargs 的 npu 分支改 ValueError——见 Open decisions #3）；model=None 时取 `os.environ.get(ENV_MODEL, default_model(engine))`，resolve_model_path 用 ov 布局。新增 `model_base=None` 可选注入缝（单测造布局用；None 时行为与现状逐字一致）。
 
 ### transcribe_once.py（modified）
 
@@ -108,7 +113,7 @@ class _NpuWhisperAdapter:
 
 ### voice_hold.py（modified，最小面）
 
-- spawn transcribe_once 的 `check_output` 增加 env 参数：`env=dict(self.env)` 后 `engine.prepend_library_path(env, engine.required_lib_paths(eng))`；eng 从启动 env 读一次
+- spawn transcribe_once 的 `check_output` 增加 env 参数：`env=engine.child_env(self.env)`（顶部新增 `import engine`——顶层纯标准库，script 目录在 sys.path 可导入）
 - 不动浮层/录音生命周期/paths（挂账）
 
 ### voice-ptt.sh / voice-toggle.sh / test-mic.sh（modified，同款收敛）
@@ -155,12 +160,12 @@ class _NpuWhisperAdapter:
 
 | ID | 功能点 | 验收方式 | 具体验证 | 通过标准 |
 |----|--------|----------|----------|----------|
-| A1 | npu 构造参数正确（device/NPU_PLATFORM/STATIC_PIPELINE/CACHE_DIR/模型路径） | 自动化验证（unit） | `pytest test_engine.py -k npu_construct`（fake pipeline_factory 断言 kwargs） | 断言全过 |
-| A2 | OV 模型解析（default_model 矩阵/布局谓词/分布局错误信息） | 自动化验证（unit） | `pytest test_engine.py -k ov_resolve`（tmp_path 造 ct2/ov/空布局；default_model 引擎矩阵） | 断言全过 |
-| A3 | adapter 兼容契约：签名、segments/info 形状、文本拼接、热词降级 warn、wav 16-bit 硬校验 | 自动化验证（unit） | `pytest test_engine.py -k adapter`（fake pipeline + tmp wav） | 断言全过 |
-| A4 | required_lib_paths 引擎矩阵（cuda 输出与历史硬编码字符串逐字节相等）+ prepend 幂等 + has_library_paths 谓词 | 自动化验证（unit） | `pytest test_engine.py -k lib_paths` | 断言全过 |
-| A5 | 既有行为不变（cuda/cpu/auto/ct2/默认值/bench） | 自动化验证（unit，既有契约） | `pytest test_engine.py test_terms.py test_archive.py test_bench.py`（全量回归） | 全绿（npu 占位契约测试按新契约改写：build_model('npu') 构造 adapter、construction_kwargs('npu')→ValueError，其余既有测试不变） |
-| A6 | transcribe_once preamble 收敛后输出等价 + npu 缺路径报错 | 自动化验证（integration） | `pytest test_engine.py -k transcribe_once_env`（子进程 harness：设/不设 env 的行为） | 断言全过 |
+| A1 | npu 构造参数正确（device/NPU_PLATFORM/STATIC_PIPELINE/CACHE_DIR/模型路径） | 自动化验证（unit） | `venv/bin/python3 -m unittest test_engine -v -k npu`（fake pipeline_factory 断言 kwargs） | 断言全过 |
+| A2 | OV 模型解析（default_model 矩阵/布局谓词/分布局错误信息） | 自动化验证（unit） | `venv/bin/python3 -m unittest test_engine -v -k ov_`（tmp_path 造 ct2/ov/空布局；default_model 引擎矩阵） | 断言全过 |
+| A3 | adapter 兼容契约：签名、segments/info 形状、文本拼接、热词降级 warn、wav 16-bit 硬校验 | 自动化验证（unit） | `venv/bin/python3 -m unittest test_engine -v -k adapter`（fake pipeline + tmp wav） | 断言全过 |
+| A4 | required_lib_paths 引擎矩阵（cuda 输出与历史硬编码字符串逐字节相等）+ prepend 幂等 + has_library_paths 谓词 + child_env（npu 注入/cpu 透传/非法引擎放行） | 自动化验证（unit） | `venv/bin/python3 -m unittest test_engine -v -k lib_paths` | 断言全过 |
+| A5 | 既有行为不变（cuda/cpu/auto/ct2/默认值/bench） | 自动化验证（unit，既有契约） | `venv/bin/python3 -m unittest test_engine test_terms test_archive test_bench -v`（全量回归） | 全绿（npu 占位契约测试按新契约改写：build_model('npu') 构造 adapter、construction_kwargs('npu')→ValueError，其余既有测试不变） |
+| A6 | transcribe_once preamble 收敛后输出等价 + npu 缺路径报错 | 自动化验证（integration） | `venv/bin/python3 -m unittest test_engine -v -k transcribe_once_env`（子进程 harness：设/不设 env 的行为） | 断言全过 |
 | A7 | 7700K 零行为变化证明 | 自动化验证（static） | 三项静态检查：git diff 无 voice-ptt.py 上屏段（xsel/xdotool 块）改动；voice-ptt.py 源内无硬编码 nvidia 库路径残留（已收敛为 engine 调用）；import engine 先于 preamble 设置（源顺序） | 三项全过（字节等价由 A4 的 cuda 历史字符串断言承担） |
 | A8 | shell wrappers 收敛后 cuda 段等价、npu 段正确 | 自动化验证（integration） | `bash -n`（语法）+ 子进程跑 wrapper 的 export 计算（注入 fake venv python） | 断言全过 |
 | U1 | OmniBook e2e：npu 听写 → Wayland 上屏；延迟数据 | 用户实测 | service 切 ENGINE=npu → 按住右 Alt 说 8s 中文 → 松开；计时 = journalctl -o short-precise 的 delivered 行时间戳与松手时刻差（辅以秒表），连续 5 次取中位；数据回贴 #19 | 文本上屏正确；热缓存单次端到端 ≤5s（目标 ~2s） |
