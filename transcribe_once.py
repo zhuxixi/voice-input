@@ -38,14 +38,34 @@ if not _SITE or not os.path.isdir(_SITE):
         "see README Installation\n"
     )
     sys.exit(1)
-os.environ["LD_LIBRARY_PATH"] = (
-    f"{_SITE}/nvidia/cublas/lib:"
-    f"{_SITE}/nvidia/cudnn/lib:"
-    f"{_SITE}/nvidia/cuda_nvrtc/lib"
-    + (f':{os.environ.get("LD_LIBRARY_PATH", "")}')
-)
 
-import engine
+import engine  # 顶层纯标准库(#16);preamble 计算收敛到 engine 单点(#19 债①)
+
+try:
+    _ENG = engine.engine_name(dict(os.environ))
+    _LIB_PATHS = engine.required_lib_paths(_ENG, _SITE)
+except ValueError as e:
+    # 非法引擎值:干净退出不裸 traceback(与 main() 内错误路径同款)
+    sys.stderr.write(f"[voice-input] {e}\n")
+    sys.exit(1)
+
+# npu 的库路径必须在进程启动时就在 LD_LIBRARY_PATH 里(ld.so 只读一次,
+# 进程内改无效——KB A/B 实证);缺失时给可行动报错,不做 re-exec 魔法
+if _ENG == "npu" and not engine.has_library_paths(dict(os.environ), _LIB_PATHS):
+    sys.stderr.write(
+        "[voice-input] NPU engine requires LD_LIBRARY_PATH to contain "
+        f"{engine.NPU_LIB_DIR} at process start (ld.so reads it once).\n"
+        "  export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu"
+        "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n"
+        "  or launch via voice-ptt.sh / voice-toggle.sh / voice_hold "
+        "(they inject it).\n"
+    )
+    sys.exit(1)
+
+# cuda/auto 与 HEAD 输出逐字节一致(A6 钉死);cpu 不设置任何路径(惰性差异,
+# spec Design #4);本进程内设置只影响子进程继承与个别 dlopen 场景
+os.environ["LD_LIBRARY_PATH"] = engine.prepend_library_path(
+    dict(os.environ), _LIB_PATHS)
 
 
 def main() -> int:

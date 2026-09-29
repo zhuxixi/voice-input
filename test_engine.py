@@ -576,5 +576,67 @@ class TestNpuAdapter(unittest.TestCase):
         self.assertIn("重采样", buf.getvalue())
 
 
+class TestTranscribeOnceEnv(unittest.TestCase):
+    """#19 A6: transcribe_once preamble 收敛后输出等价 + npu 缺路径可行动报错。
+
+    干净子进程 import transcribe_once(模块顶层副作用会设置 LD_LIBRARY_PATH),
+    打印结果供比对。沿用本文件既有子进程 harness 内联模式(helper 抽取债挂账)。
+    """
+
+    REPO = os.path.dirname(os.path.realpath(__file__))
+    VENV_PY = os.path.join(REPO, "venv", "bin", "python3")
+
+    def _import_in_subprocess(self, env_extra):
+        code = (
+            "import os, sys; sys.path.insert(0, %r);"
+            "import transcribe_once;"
+            "print(os.environ.get('LD_LIBRARY_PATH', ''))" % self.REPO
+        )
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("LD_LIBRARY_PATH", "VOICE_INPUT_ENGINE",
+                            "VOICE_INPUT_MODEL")}
+        env.update(env_extra)
+        p = subprocess.run([self.VENV_PY, "-c", code],
+                           capture_output=True, text=True, env=env)
+        return p.returncode, p.stdout.strip(), p.stderr
+
+    def _venv_site(self):
+        return subprocess.check_output(
+            [self.VENV_PY, "-c",
+             "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+            text=True).strip()
+
+    def test_transcribe_once_env_cuda_preamble_byte_equal_legacy(self):
+        site = self._venv_site()
+        rc, out, err = self._import_in_subprocess({"LD_LIBRARY_PATH": "/opt/keep"})
+        self.assertEqual(rc, 0, err)
+        # HEAD 历史串逐字节: f"{site}/nvidia/cublas/lib:{site}/nvidia/cudnn/lib:{site}/nvidia/cuda_nvrtc/lib:{old}"
+        self.assertEqual(
+            out,
+            f"{site}/nvidia/cublas/lib:{site}/nvidia/cudnn/lib:"
+            f"{site}/nvidia/cuda_nvrtc/lib:/opt/keep")
+
+    def test_transcribe_once_env_npu_missing_path_actionable(self):
+        rc, out, err = self._import_in_subprocess({"VOICE_INPUT_ENGINE": "npu"})
+        self.assertEqual(rc, 1)
+        self.assertIn("/usr/lib/x86_64-linux-gnu", err)
+        self.assertIn("export LD_LIBRARY_PATH", err)
+
+    def test_transcribe_once_env_npu_with_path_ok(self):
+        rc, out, err = self._import_in_subprocess({
+            "VOICE_INPUT_ENGINE": "npu",
+            "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu",
+        })
+        self.assertEqual(rc, 0, err)
+        self.assertIn("/usr/lib/x86_64-linux-gnu", out)
+
+    def test_transcribe_once_env_cpu_no_nvidia_paths(self):
+        # 惰性差异(spec Design #4):cpu 不再设置 nvidia 路径,旧值原样保留
+        rc, out, err = self._import_in_subprocess({
+            "VOICE_INPUT_ENGINE": "cpu", "LD_LIBRARY_PATH": "/opt/keep"})
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "/opt/keep")
+
+
 if __name__ == "__main__":
     unittest.main()
