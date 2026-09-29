@@ -135,11 +135,6 @@ class TestEngineValidation(unittest.TestCase):
                 engine.engine_name({"VOICE_INPUT_ENGINE": v}), v
             )
 
-    def test_npu_build_raises_not_implemented(self):
-        with self.assertRaises(NotImplementedError) as ctx:
-            engine.build_model(engine="npu", model="x")
-        self.assertIn("#19", str(ctx.exception))
-
     def test_build_model_direct_invalid_engine_raises(self):
         # 绕过 engine_name 显式传非法值 → 同样 fail fast
         with self.assertRaises(ValueError):
@@ -211,10 +206,11 @@ class TestConstructionKwargs(unittest.TestCase):
             engine.construction_kwargs("auto"), engine.construction_kwargs("cuda")
         )
 
-    def test_npu_raises_not_implemented(self):
-        with self.assertRaises(NotImplementedError) as ctx:
+    def test_construction_kwargs_npu_value_error(self):
+        # #19: npu 不再有 faster-whisper 构造参数——"不适用"而非"未实现"
+        with self.assertRaises(ValueError) as ctx:
             engine.construction_kwargs("npu")
-        self.assertIn("#19", str(ctx.exception))
+        self.assertIn("build_model", str(ctx.exception))
 
     def test_invalid_raises_value_error(self):
         with self.assertRaises(ValueError):
@@ -277,6 +273,412 @@ class TestModulePurity(unittest.TestCase):
             capture_output=True,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+
+
+class TestLibPaths(unittest.TestCase):
+    """#19 A4: 库路径单点计算 / prepend 幂等 / has_library_paths 谓词 / child_env。"""
+
+    SITE = "/venv/lib/python3.12/site-packages"
+    LEGACY_CUDA = [
+        f"{SITE}/nvidia/cublas/lib",
+        f"{SITE}/nvidia/cudnn/lib",
+        f"{SITE}/nvidia/cuda_nvrtc/lib",
+    ]
+
+    def test_lib_paths_cuda_byte_equal_legacy(self):
+        self.assertEqual(
+            engine.required_lib_paths("cuda", self.SITE), self.LEGACY_CUDA)
+
+    def test_lib_paths_auto_same_as_cuda(self):
+        self.assertEqual(
+            engine.required_lib_paths("auto", self.SITE), self.LEGACY_CUDA)
+
+    def test_lib_paths_cpu_empty(self):
+        self.assertEqual(engine.required_lib_paths("cpu"), [])
+
+    def test_lib_paths_npu(self):
+        self.assertEqual(
+            engine.required_lib_paths("npu"), ["/usr/lib/x86_64-linux-gnu"])
+
+    def test_lib_paths_cuda_requires_site(self):
+        with self.assertRaises(ValueError):
+            engine.required_lib_paths("cuda")
+
+    def test_lib_paths_invalid_engine(self):
+        with self.assertRaises(ValueError):
+            engine.required_lib_paths("tpu", self.SITE)
+
+    def test_prepend_empty_env(self):
+        env = {}
+        got = engine.prepend_library_path(env, self.LEGACY_CUDA)
+        self.assertEqual(got, ":".join(self.LEGACY_CUDA))
+        self.assertEqual(env["LD_LIBRARY_PATH"], got)
+
+    def test_prepend_appends_existing_byte_equal_legacy(self):
+        # HEAD 历史输出: f"{p1}:{p2}:{p3}:{old}" —— 逐字节一致
+        env = {"LD_LIBRARY_PATH": "/opt/keep"}
+        got = engine.prepend_library_path(env, self.LEGACY_CUDA)
+        self.assertEqual(got, ":".join(self.LEGACY_CUDA) + ":/opt/keep")
+
+    def test_prepend_idempotent(self):
+        env = {"LD_LIBRARY_PATH": "/a"}
+        engine.prepend_library_path(env, [engine.NPU_LIB_DIR])
+        engine.prepend_library_path(env, [engine.NPU_LIB_DIR])
+        self.assertEqual(env["LD_LIBRARY_PATH"], f"{engine.NPU_LIB_DIR}:/a")
+
+    def test_prepend_empty_paths_noop(self):
+        env = {"LD_LIBRARY_PATH": "/keep"}
+        self.assertEqual(engine.prepend_library_path(env, []), "/keep")
+
+    def test_has_library_paths_exact_component_match(self):
+        # 兄弟目录 /usr/lib/x86_64-linux-gnu-extras 不得误判为已含
+        env = {"LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu-extras"}
+        self.assertFalse(engine.has_library_paths(env, [engine.NPU_LIB_DIR]))
+        env2 = {"LD_LIBRARY_PATH": f"/opt/x:{engine.NPU_LIB_DIR}"}
+        self.assertTrue(engine.has_library_paths(env2, [engine.NPU_LIB_DIR]))
+
+    def test_child_env_npu_injects(self):
+        out = engine.child_env({"VOICE_INPUT_ENGINE": "npu", "X": "1"})
+        self.assertEqual(out["LD_LIBRARY_PATH"], engine.NPU_LIB_DIR)
+        self.assertEqual(out["X"], "1")
+
+    def test_child_env_npu_idempotent_when_present(self):
+        out = engine.child_env({
+            "VOICE_INPUT_ENGINE": "npu",
+            "LD_LIBRARY_PATH": engine.NPU_LIB_DIR,
+        })
+        self.assertEqual(out["LD_LIBRARY_PATH"], engine.NPU_LIB_DIR)
+
+    def test_child_env_cpu_passthrough_copy(self):
+        src = {"VOICE_INPUT_ENGINE": "cpu", "LD_LIBRARY_PATH": "/opt/x"}
+        out = engine.child_env(src)
+        self.assertEqual(out, src)
+        self.assertIsNot(out, src)
+
+    def test_child_env_invalid_engine_passthrough(self):
+        src = {"VOICE_INPUT_ENGINE": "bogus"}
+        self.assertEqual(engine.child_env(src), src)
+
+
+class TestOvResolve(unittest.TestCase):
+    """#19 A2: default_model 矩阵 / ov 布局谓词 / 分布局错误信息。"""
+
+    def test_default_model_matrix(self):
+        self.assertEqual(engine.default_model("npu"), "small-int8-ov")
+        self.assertEqual(engine.default_model("cuda"), "large-v3")
+        self.assertEqual(engine.default_model("cpu"), "large-v3")
+        self.assertEqual(engine.default_model("auto"), "large-v3")
+
+    def test_default_model_invalid_engine(self):
+        with self.assertRaises(ValueError):
+            engine.default_model("bogus")
+
+    def test_ov_snapshots_base_value(self):
+        self.assertEqual(
+            engine.ov_snapshots_base("small-int8-ov"),
+            os.path.expanduser(
+                "~/.cache/huggingface/hub/"
+                "models--OpenVINO--whisper-small-int8-ov/snapshots"),
+        )
+
+    def test_resolve_ov_layout_found(self):
+        with tempfile.TemporaryDirectory() as root:
+            snap = os.path.join(root, "snapshots", "abc123")
+            os.makedirs(snap)
+            open(os.path.join(snap, "openvino_encoder_model.xml"), "wb").close()
+            got = engine.resolve_model_path("small-int8-ov", base=os.path.join(root, "snapshots"), layout="ov")
+            self.assertEqual(got, snap)
+
+    def test_resolve_ov_layout_missing_actionable_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(RuntimeError) as ctx:
+                engine.resolve_model_path("small-int8-ov", base=root, layout="ov")
+            self.assertIn("huggingface-cli download OpenVINO/whisper-small-int8-ov", str(ctx.exception))
+
+    def test_resolve_ct2_error_mentions_download_model_sh(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(RuntimeError) as ctx:
+                engine.resolve_model_path("large-v3", base=root)
+            self.assertIn("./download-model.sh large-v3", str(ctx.exception))
+
+    def test_resolve_ov_layout_ignores_ct2_only_snapshot(self):
+        # ct2 布局快照(model.bin)不应被 ov 谓词误认
+        with tempfile.TemporaryDirectory() as root:
+            snap = os.path.join(root, "snapshots", "dl")
+            os.makedirs(snap)
+            open(os.path.join(snap, "model.bin"), "wb").close()
+            with self.assertRaises(RuntimeError):
+                engine.resolve_model_path("small-int8-ov", base=os.path.join(root, "snapshots"), layout="ov")
+
+    def test_resolve_unknown_layout(self):
+        with self.assertRaises(ValueError):
+            engine.resolve_model_path("x", base="/tmp", layout="onnx")
+
+
+class _FakeGenaiPipe:
+    """记录 generate 调用的假 WhisperPipeline(A1/A3 用,不碰 openvino_genai)。"""
+
+    def __init__(self, texts=("你好",)):
+        self.texts = list(texts)
+        self.generate_calls = []
+
+    def generate(self, samples, **kwargs):
+        self.generate_calls.append({"n_samples": len(samples), "kwargs": kwargs})
+        from types import SimpleNamespace
+        return SimpleNamespace(texts=self.texts)
+
+
+class _FakePipeFactory:
+    """记录构造 kwargs 的假 WhisperPipeline 工厂。"""
+
+    def __init__(self, pipe=None):
+        self.calls = []
+        self.pipe = pipe or _FakeGenaiPipe()
+
+    def __call__(self, model_dir, **kwargs):
+        self.calls.append({"model_dir": model_dir, "kwargs": kwargs})
+        return self.pipe
+
+
+def _make_ov_base(root: str, model: str = "small-int8-ov") -> str:
+    """tmpdir 造 OV 快照布局,返回 snapshots 目录(resolve_model_path base 注入)。"""
+    base = os.path.join(root, f"models--OpenVINO--whisper-{model}", "snapshots")
+    snap = os.path.join(base, "abc123")
+    os.makedirs(snap)
+    open(os.path.join(snap, "openvino_encoder_model.xml"), "wb").close()
+    return base
+
+
+def _write_wav(path: str, samples=((0, 16384, -16384)), rate=16000, width=2, channels=1):
+    import wave
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(width)
+        w.setframerate(rate)
+        if width == 2:
+            import struct
+            w.writeframes(b"".join(struct.pack("<h", s) for s in samples))
+        else:
+            w.writeframes(bytes(len(samples) * width * channels))
+
+
+class TestNpuConstruction(unittest.TestCase):
+    """#19 A1: npu 构造参数(device/NPU_PLATFORM/STATIC_PIPELINE/CACHE_DIR/模型路径)。"""
+
+    def test_npu_build_constructs_adapter_with_static_kwargs(self):
+        factory = _FakePipeFactory()
+        with tempfile.TemporaryDirectory() as root:
+            base = _make_ov_base(root)
+            m = engine.build_model(engine="npu", model="small-int8-ov",
+                                   pipeline_factory=factory, model_base=base)
+        self.assertIsInstance(m, engine._NpuWhisperAdapter)
+        self.assertEqual(len(factory.calls), 1)
+        call = factory.calls[0]
+        self.assertTrue(call["model_dir"].endswith("abc123"))
+        self.assertEqual(call["kwargs"], {
+            "device": "NPU",
+            "NPU_PLATFORM": "NPU4000",
+            "STATIC_PIPELINE": True,
+            "CACHE_DIR": engine.NPU_COMPILE_CACHE,
+        })
+
+    def test_npu_default_model_when_env_unset(self):
+        factory = _FakePipeFactory()
+        with tempfile.TemporaryDirectory() as root:
+            base = _make_ov_base(root)  # small-int8-ov 布局
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("VOICE_INPUT_MODEL", None)
+                engine.build_model(engine="npu", pipeline_factory=factory,
+                                   model_base=base)
+        self.assertIn("abc123", factory.calls[0]["model_dir"])
+
+    def test_npu_missing_model_actionable(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(RuntimeError) as ctx:
+                engine.build_model(engine="npu", model="small-int8-ov",
+                                   pipeline_factory=_FakePipeFactory(), model_base=root)
+            self.assertIn("huggingface-cli download", str(ctx.exception))
+
+
+class TestNpuAdapter(unittest.TestCase):
+    """#19 A3: adapter 兼容契约 / 热词降级 warn / wav 16-bit 硬校验。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.wav = os.path.join(self.tmp.name, "t.wav")
+        _write_wav(self.wav)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_adapter(self, texts=("你好",), pipe=None):
+        pipe = pipe or _FakeGenaiPipe(texts)
+        return engine._NpuWhisperAdapter("/fake/model", pipeline_factory=lambda d, **kw: pipe), pipe
+
+    def test_adapter_transcribe_contract(self):
+        adapter, pipe = self._make_adapter(texts=["你好", "世界"])
+        segments, info = adapter.transcribe(self.wav, language="zh")
+        self.assertEqual("".join(s.text for s in segments), "你好 世界")
+        self.assertEqual(info.language, "zh")
+        self.assertEqual(pipe.generate_calls[0]["kwargs"], {"language": "zh"})
+        self.assertEqual(pipe.generate_calls[0]["n_samples"], 3)
+
+    def test_adapter_empty_result_empty_segments(self):
+        adapter, _ = self._make_adapter(texts=[])
+        segments, info = adapter.transcribe(self.wav)
+        self.assertEqual(segments, [])
+
+    def test_adapter_hotword_degradation_warns(self):
+        warns = []
+        pipe = _FakeGenaiPipe()
+        adapter = engine._NpuWhisperAdapter(
+            "/fake/model", pipeline_factory=lambda d, **kw: pipe, warn=warns.append)
+        adapter.transcribe(self.wav, language="zh",
+                           initial_prompt="术语:重构", hotwords="HoloWord")
+        self.assertEqual(len(warns), 1)
+        self.assertIn("not supported", warns[0])
+        # generate 不得收到 initial_prompt/hotwords(NPU 静态管线 C++ 硬拒)
+        self.assertEqual(pipe.generate_calls[0]["kwargs"], {"language": "zh"})
+
+    def test_adapter_no_warn_without_prompt(self):
+        warns = []
+        pipe = _FakeGenaiPipe()
+        adapter = engine._NpuWhisperAdapter(
+            "/fake/model", pipeline_factory=lambda d, **kw: pipe, warn=warns.append)
+        adapter.transcribe(self.wav, language="zh")
+        self.assertEqual(warns, [])
+
+    def test_adapter_ignores_extra_kwargs(self):
+        adapter, pipe = self._make_adapter()
+        adapter.transcribe(self.wav, language="zh", beam_size=5, task="transcribe")
+        self.assertEqual(pipe.generate_calls[0]["kwargs"], {"language": "zh"})
+
+    def test_load_wav_samples_int16_normalized(self):
+        import numpy as np
+        arr = engine._load_wav_samples(self.wav)
+        self.assertEqual(arr.dtype, np.float32)
+        np.testing.assert_allclose(arr, [0.0, 0.5, -0.5], atol=1e-4)
+
+    def test_load_wav_samples_rejects_24bit(self):
+        wav24 = os.path.join(self.tmp.name, "24.wav")
+        _write_wav(wav24, width=3)
+        with self.assertRaises(ValueError) as ctx:
+            engine._load_wav_samples(wav24)
+        self.assertIn("采样宽度", str(ctx.exception))
+
+    def test_load_wav_samples_warns_non_16k(self):
+        import contextlib, io
+        wav8k = os.path.join(self.tmp.name, "8k.wav")
+        _write_wav(wav8k, rate=8000)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            engine._load_wav_samples(wav8k)
+        self.assertIn("重采样", buf.getvalue())
+
+
+class TestTranscribeOnceEnv(unittest.TestCase):
+    """#19 A6: transcribe_once preamble 收敛后输出等价 + npu 缺路径可行动报错。
+
+    干净子进程 import transcribe_once(模块顶层副作用会设置 LD_LIBRARY_PATH),
+    打印结果供比对。沿用本文件既有子进程 harness 内联模式(helper 抽取债挂账)。
+    """
+
+    REPO = os.path.dirname(os.path.realpath(__file__))
+    VENV_PY = os.path.join(REPO, "venv", "bin", "python3")
+
+    def _import_in_subprocess(self, env_extra):
+        code = (
+            "import os, sys; sys.path.insert(0, %r);"
+            "import transcribe_once;"
+            "print(os.environ.get('LD_LIBRARY_PATH', ''))" % self.REPO
+        )
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("LD_LIBRARY_PATH", "VOICE_INPUT_ENGINE",
+                            "VOICE_INPUT_MODEL")}
+        env.update(env_extra)
+        p = subprocess.run([self.VENV_PY, "-c", code],
+                           capture_output=True, text=True, env=env)
+        return p.returncode, p.stdout.strip(), p.stderr
+
+    def _venv_site(self):
+        return subprocess.check_output(
+            [self.VENV_PY, "-c",
+             "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+            text=True).strip()
+
+    def test_transcribe_once_env_cuda_preamble_byte_equal_legacy(self):
+        site = self._venv_site()
+        rc, out, err = self._import_in_subprocess({"LD_LIBRARY_PATH": "/opt/keep"})
+        self.assertEqual(rc, 0, err)
+        # HEAD 历史串逐字节: f"{site}/nvidia/cublas/lib:{site}/nvidia/cudnn/lib:{site}/nvidia/cuda_nvrtc/lib:{old}"
+        self.assertEqual(
+            out,
+            f"{site}/nvidia/cublas/lib:{site}/nvidia/cudnn/lib:"
+            f"{site}/nvidia/cuda_nvrtc/lib:/opt/keep")
+
+    def test_transcribe_once_env_npu_missing_path_actionable(self):
+        rc, out, err = self._import_in_subprocess({"VOICE_INPUT_ENGINE": "npu"})
+        self.assertEqual(rc, 1)
+        self.assertIn("/usr/lib/x86_64-linux-gnu", err)
+        self.assertIn("export LD_LIBRARY_PATH", err)
+
+    def test_transcribe_once_env_npu_with_path_ok(self):
+        rc, out, err = self._import_in_subprocess({
+            "VOICE_INPUT_ENGINE": "npu",
+            "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu",
+        })
+        self.assertEqual(rc, 0, err)
+        self.assertIn("/usr/lib/x86_64-linux-gnu", out)
+
+    def test_transcribe_once_env_cpu_no_nvidia_paths(self):
+        # 惰性差异(spec Design #4):cpu 不再设置 nvidia 路径,旧值原样保留
+        rc, out, err = self._import_in_subprocess({
+            "VOICE_INPUT_ENGINE": "cpu", "LD_LIBRARY_PATH": "/opt/keep"})
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, "/opt/keep")
+
+
+class TestWrapperExport(unittest.TestCase):
+    """#19 A8: wrapper 的 export 计算与收敛后语义一致(cuda 逐字节/npu 正确/cpu 空)。
+
+    测的是 wrapper 里那段 python 计算片段本身(与 voice-ptt.sh/voice-toggle.sh/
+    test-mic.sh 内嵌代码逐字相同),而非整个 wrapper——wrapper 端到端需 fake venv,
+    超出最低成本层级;bash -n 语法检查在 Task 步骤里跑。
+    """
+
+    REPO = os.path.dirname(os.path.realpath(__file__))
+    VENV_PY = os.path.join(REPO, "venv", "bin", "python3")
+    SITE = "/site"
+    SNIPPET = (
+        "import os, sys; sys.path.insert(0, %r); import engine; "
+        "print(':'.join(engine.required_lib_paths("
+        "engine.engine_name(dict(os.environ)), %r)))" % (REPO, SITE)
+    )
+
+    def _run(self, env_extra):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("VOICE_INPUT_ENGINE", "VOICE_INPUT_MODEL")}
+        env.update(env_extra)
+        p = subprocess.run([self.VENV_PY, "-c", self.SNIPPET],
+                           capture_output=True, text=True, env=env)
+        return p.returncode, p.stdout.strip(), p.stderr
+
+    def test_wrapper_export_unset_defaults_cuda_legacy_order(self):
+        rc, out, _ = self._run({})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, f"{self.SITE}/nvidia/cublas/lib:"
+                              f"{self.SITE}/nvidia/cudnn/lib:"
+                              f"{self.SITE}/nvidia/cuda_nvrtc/lib")
+
+    def test_wrapper_export_npu(self):
+        rc, out, _ = self._run({"VOICE_INPUT_ENGINE": "npu"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "/usr/lib/x86_64-linux-gnu")
+
+    def test_wrapper_export_cpu_empty(self):
+        rc, out, _ = self._run({"VOICE_INPUT_ENGINE": "cpu"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
 
 
 if __name__ == "__main__":

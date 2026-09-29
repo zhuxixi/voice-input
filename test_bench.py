@@ -58,32 +58,6 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(ns.npu_platform, "NPU4000")
 
 
-class TestSetNpuLibraryPath(unittest.TestCase):
-    """A2:NPU 库路径前插(注入式,幂等,不动 os.environ)。"""
-
-    def test_empty_env(self):
-        env = {}
-        got = bench.set_npu_library_path(env)
-        self.assertEqual(got, bench.NPU_LIB_DIR)
-        self.assertEqual(env["LD_LIBRARY_PATH"], bench.NPU_LIB_DIR)
-
-    def test_prepends_and_keeps_old(self):
-        env = {"LD_LIBRARY_PATH": "/opt/x"}
-        got = bench.set_npu_library_path(env)
-        self.assertEqual(got, f"{bench.NPU_LIB_DIR}:/opt/x")
-
-    def test_idempotent_no_dup(self):
-        env = {"LD_LIBRARY_PATH": "/a"}
-        bench.set_npu_library_path(env)
-        bench.set_npu_library_path(env)
-        self.assertEqual(env["LD_LIBRARY_PATH"], f"{bench.NPU_LIB_DIR}:/a")
-
-    def test_does_not_touch_os_environ(self):
-        before = dict(os.environ)
-        bench.set_npu_library_path({"LD_LIBRARY_PATH": "/tmp/x"})
-        self.assertEqual(os.environ, before)
-
-
 class TestFormatReport(unittest.TestCase):
     """A2:报告格式化——spec 契约 11 个字段全部出现。"""
 
@@ -165,7 +139,7 @@ class TestNeedsReexec(unittest.TestCase):
         self.assertTrue(bench.needs_reexec_for_npu({"LD_LIBRARY_PATH": "/usr/lib"}))
 
     def test_no_reexec_when_present(self):
-        env = {"LD_LIBRARY_PATH": bench.NPU_LIB_DIR + ":/usr/lib"}
+        env = {"LD_LIBRARY_PATH": bench.engine.NPU_LIB_DIR + ":/usr/lib"}
         self.assertFalse(bench.needs_reexec_for_npu(env))
 
     def test_no_reexec_loop_with_sentinel(self):
@@ -174,20 +148,7 @@ class TestNeedsReexec(unittest.TestCase):
 
 
 class TestCrRound1Fixes(unittest.TestCase):
-    """CR round-1 修复的回归测试(发现 2/3/4/9)。"""
-
-    def test_lib_dir_predicate_sibling_prefix_not_matched(self):
-        # 发现 2/9:兄弟目录 /usr/lib/x86_64-linux-gnu-extras 不能算已包含
-        sibling = bench.NPU_LIB_DIR + "-extras"
-        env = {"LD_LIBRARY_PATH": sibling}
-        self.assertTrue(bench.needs_reexec_for_npu(env))   # 缺 → 需 re-exec
-        bench.set_npu_library_path(env)                     # 前插真正目录
-        self.assertIn(bench.NPU_LIB_DIR, env["LD_LIBRARY_PATH"].split(":"))
-
-    def test_set_and_needs_agree_after_prefix_case(self):
-        env = {"LD_LIBRARY_PATH": bench.NPU_LIB_DIR + "-extras:/usr/lib"}
-        bench.set_npu_library_path(env)
-        self.assertFalse(bench.needs_reexec_for_npu(env))   # 修后两者一致
+    """CR round-1 修复的回归测试(发现 3/4)。"""
 
     def test_reexec_command_uses_explicit_argv_and_script(self):
         # 发现 3:编程调用 main([...]) 时不得用宿主 sys.argv

@@ -23,6 +23,8 @@ import sys
 import threading
 import time
 
+import engine  # 顶层纯标准库(#16 同款);npu 子进程 env 注入的唯一来源(#19)
+
 REPO_DIR = os.path.dirname(os.path.realpath(__file__))
 VENV_PY = os.path.join(REPO_DIR, "venv", "bin", "python3")
 WAVFILE = "/tmp/voice-input-hold.wav"
@@ -248,6 +250,9 @@ class HoldDaemon:
                 text = subprocess.check_output(
                     [VENV_PY, os.path.join(REPO_DIR, "transcribe_once.py"),
                      WAVFILE],
+                    # npu 时注入 NPU 库目录(ld.so 只在子进程启动读一次);
+                    # 其他引擎原样拷贝,维持现状(#19)
+                    env=engine.child_env(self.env),
                     stderr=sys.stderr, text=True,
                     timeout=self._transcribe_timeout()).strip()
             except subprocess.TimeoutExpired:

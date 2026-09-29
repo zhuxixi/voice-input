@@ -12,7 +12,23 @@ if [ -z "$SITE_PACKAGES" ]; then
     echo "test-mic.sh: venv not found under $REPO_DIR — see README Installation" >&2
     exit 1
 fi
-export LD_LIBRARY_PATH="$SITE_PACKAGES/nvidia/cublas/lib:$SITE_PACKAGES/nvidia/cudnn/lib:$SITE_PACKAGES/nvidia/cuda_nvrtc/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# 库路径前置收敛到 engine.py 单点(#19 债①),按 VOICE_INPUT_ENGINE 计算:
+# cuda/auto -> venv nvidia pip 三路径(输出与历史逐字节一致,A8 钉死);
+# npu -> ze 驱动库目录(ld.so 只在进程启动读 LD_LIBRARY_PATH,必须在 exec 前导出);
+# cpu -> 空(惰性差异,spec Design #4)
+LIB_PATHS="$("$VENV/bin/python3" -c "
+import os, sys
+sys.path.insert(0, '$REPO_DIR')
+import engine
+try:
+    print(':'.join(engine.required_lib_paths(engine.engine_name(dict(os.environ)), '$SITE_PACKAGES')))
+except ValueError as e:
+    print(e, file=sys.stderr)
+    sys.exit(1)
+")" || exit 1
+if [ -n "$LIB_PATHS" ]; then
+    export LD_LIBRARY_PATH="$LIB_PATHS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 
 WAV="/tmp/test-mic.wav"
 
@@ -25,10 +41,10 @@ sys.path.insert(0, '$REPO_DIR')
 import engine
 try:
     eng = engine.engine_name(dict(os.environ))
-    if eng == 'npu':
-        raise NotImplementedError('NPU engine not implemented yet - see issue #19')
-    engine.resolve_model_path()
-except (ValueError, RuntimeError, NotImplementedError) as e:
+    # #19: npu 已实现——按引擎选模型布局与默认模型,毫秒级不加载模型
+    model = os.environ.get(engine.ENV_MODEL) or engine.default_model(eng)
+    engine.resolve_model_path(model, layout='ov' if eng == 'npu' else 'ct2')
+except (ValueError, RuntimeError) as e:
     print(e)
     sys.exit(1)
 " 2>&1)

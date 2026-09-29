@@ -85,7 +85,10 @@ def main():
     try:
         eng = engine.engine_name(dict(os.environ))
         if eng == "npu":
-            print("NPU engine not implemented yet — see issue #19", file=sys.stderr)
+            # #19: npu 已实现但用 OpenVINO 格式模型,本脚本只下载 faster-whisper 格式
+            print("npu engine uses OpenVINO models — see README "
+                  "(huggingface-cli download OpenVINO/whisper-small-int8-ov)",
+                  file=sys.stderr)
             sys.exit(1)
         kwargs = engine.construction_kwargs(eng)
     except ValueError as e:
