@@ -638,5 +638,48 @@ class TestTranscribeOnceEnv(unittest.TestCase):
         self.assertEqual(out, "/opt/keep")
 
 
+class TestWrapperExport(unittest.TestCase):
+    """#19 A8: wrapper 的 export 计算与收敛后语义一致(cuda 逐字节/npu 正确/cpu 空)。
+
+    测的是 wrapper 里那段 python 计算片段本身(与 voice-ptt.sh/voice-toggle.sh/
+    test-mic.sh 内嵌代码逐字相同),而非整个 wrapper——wrapper 端到端需 fake venv,
+    超出最低成本层级;bash -n 语法检查在 Task 步骤里跑。
+    """
+
+    REPO = os.path.dirname(os.path.realpath(__file__))
+    VENV_PY = os.path.join(REPO, "venv", "bin", "python3")
+    SITE = "/site"
+    SNIPPET = (
+        "import os, sys; sys.path.insert(0, %r); import engine; "
+        "print(':'.join(engine.required_lib_paths("
+        "engine.engine_name(dict(os.environ)), %r)))" % (REPO, SITE)
+    )
+
+    def _run(self, env_extra):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("VOICE_INPUT_ENGINE", "VOICE_INPUT_MODEL")}
+        env.update(env_extra)
+        p = subprocess.run([self.VENV_PY, "-c", self.SNIPPET],
+                           capture_output=True, text=True, env=env)
+        return p.returncode, p.stdout.strip(), p.stderr
+
+    def test_wrapper_export_unset_defaults_cuda_legacy_order(self):
+        rc, out, _ = self._run({})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, f"{self.SITE}/nvidia/cublas/lib:"
+                              f"{self.SITE}/nvidia/cudnn/lib:"
+                              f"{self.SITE}/nvidia/cuda_nvrtc/lib")
+
+    def test_wrapper_export_npu(self):
+        rc, out, _ = self._run({"VOICE_INPUT_ENGINE": "npu"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "/usr/lib/x86_64-linux-gnu")
+
+    def test_wrapper_export_cpu_empty(self):
+        rc, out, _ = self._run({"VOICE_INPUT_ENGINE": "cpu"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+
+
 if __name__ == "__main__":
     unittest.main()
