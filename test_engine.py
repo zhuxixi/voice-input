@@ -279,5 +279,145 @@ class TestModulePurity(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
 
 
+class TestLibPaths(unittest.TestCase):
+    """#19 A4: 库路径单点计算 / prepend 幂等 / has_library_paths 谓词 / child_env。"""
+
+    SITE = "/venv/lib/python3.12/site-packages"
+    LEGACY_CUDA = [
+        f"{SITE}/nvidia/cublas/lib",
+        f"{SITE}/nvidia/cudnn/lib",
+        f"{SITE}/nvidia/cuda_nvrtc/lib",
+    ]
+
+    def test_lib_paths_cuda_byte_equal_legacy(self):
+        self.assertEqual(
+            engine.required_lib_paths("cuda", self.SITE), self.LEGACY_CUDA)
+
+    def test_lib_paths_auto_same_as_cuda(self):
+        self.assertEqual(
+            engine.required_lib_paths("auto", self.SITE), self.LEGACY_CUDA)
+
+    def test_lib_paths_cpu_empty(self):
+        self.assertEqual(engine.required_lib_paths("cpu"), [])
+
+    def test_lib_paths_npu(self):
+        self.assertEqual(
+            engine.required_lib_paths("npu"), ["/usr/lib/x86_64-linux-gnu"])
+
+    def test_lib_paths_cuda_requires_site(self):
+        with self.assertRaises(ValueError):
+            engine.required_lib_paths("cuda")
+
+    def test_lib_paths_invalid_engine(self):
+        with self.assertRaises(ValueError):
+            engine.required_lib_paths("tpu", self.SITE)
+
+    def test_prepend_empty_env(self):
+        env = {}
+        got = engine.prepend_library_path(env, self.LEGACY_CUDA)
+        self.assertEqual(got, ":".join(self.LEGACY_CUDA))
+        self.assertEqual(env["LD_LIBRARY_PATH"], got)
+
+    def test_prepend_appends_existing_byte_equal_legacy(self):
+        # HEAD 历史输出: f"{p1}:{p2}:{p3}:{old}" —— 逐字节一致
+        env = {"LD_LIBRARY_PATH": "/opt/keep"}
+        got = engine.prepend_library_path(env, self.LEGACY_CUDA)
+        self.assertEqual(got, ":".join(self.LEGACY_CUDA) + ":/opt/keep")
+
+    def test_prepend_idempotent(self):
+        env = {"LD_LIBRARY_PATH": "/a"}
+        engine.prepend_library_path(env, [engine.NPU_LIB_DIR])
+        engine.prepend_library_path(env, [engine.NPU_LIB_DIR])
+        self.assertEqual(env["LD_LIBRARY_PATH"], f"{engine.NPU_LIB_DIR}:/a")
+
+    def test_prepend_empty_paths_noop(self):
+        env = {"LD_LIBRARY_PATH": "/keep"}
+        self.assertEqual(engine.prepend_library_path(env, []), "/keep")
+
+    def test_has_library_paths_exact_component_match(self):
+        # 兄弟目录 /usr/lib/x86_64-linux-gnu-extras 不得误判为已含
+        env = {"LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu-extras"}
+        self.assertFalse(engine.has_library_paths(env, [engine.NPU_LIB_DIR]))
+        env2 = {"LD_LIBRARY_PATH": f"/opt/x:{engine.NPU_LIB_DIR}"}
+        self.assertTrue(engine.has_library_paths(env2, [engine.NPU_LIB_DIR]))
+
+    def test_child_env_npu_injects(self):
+        out = engine.child_env({"VOICE_INPUT_ENGINE": "npu", "X": "1"})
+        self.assertEqual(out["LD_LIBRARY_PATH"], engine.NPU_LIB_DIR)
+        self.assertEqual(out["X"], "1")
+
+    def test_child_env_npu_idempotent_when_present(self):
+        out = engine.child_env({
+            "VOICE_INPUT_ENGINE": "npu",
+            "LD_LIBRARY_PATH": engine.NPU_LIB_DIR,
+        })
+        self.assertEqual(out["LD_LIBRARY_PATH"], engine.NPU_LIB_DIR)
+
+    def test_child_env_cpu_passthrough_copy(self):
+        src = {"VOICE_INPUT_ENGINE": "cpu", "LD_LIBRARY_PATH": "/opt/x"}
+        out = engine.child_env(src)
+        self.assertEqual(out, src)
+        self.assertIsNot(out, src)
+
+    def test_child_env_invalid_engine_passthrough(self):
+        src = {"VOICE_INPUT_ENGINE": "bogus"}
+        self.assertEqual(engine.child_env(src), src)
+
+
+class TestOvResolve(unittest.TestCase):
+    """#19 A2: default_model 矩阵 / ov 布局谓词 / 分布局错误信息。"""
+
+    def test_default_model_matrix(self):
+        self.assertEqual(engine.default_model("npu"), "small-int8-ov")
+        self.assertEqual(engine.default_model("cuda"), "large-v3")
+        self.assertEqual(engine.default_model("cpu"), "large-v3")
+        self.assertEqual(engine.default_model("auto"), "large-v3")
+
+    def test_default_model_invalid_engine(self):
+        with self.assertRaises(ValueError):
+            engine.default_model("bogus")
+
+    def test_ov_snapshots_base_value(self):
+        self.assertEqual(
+            engine.ov_snapshots_base("small-int8-ov"),
+            os.path.expanduser(
+                "~/.cache/huggingface/hub/"
+                "models--OpenVINO--whisper-small-int8-ov/snapshots"),
+        )
+
+    def test_resolve_ov_layout_found(self):
+        with tempfile.TemporaryDirectory() as root:
+            snap = os.path.join(root, "snapshots", "abc123")
+            os.makedirs(snap)
+            open(os.path.join(snap, "openvino_encoder_model.xml"), "wb").close()
+            got = engine.resolve_model_path("small-int8-ov", base=os.path.join(root, "snapshots"), layout="ov")
+            self.assertEqual(got, snap)
+
+    def test_resolve_ov_layout_missing_actionable_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(RuntimeError) as ctx:
+                engine.resolve_model_path("small-int8-ov", base=root, layout="ov")
+            self.assertIn("huggingface-cli download OpenVINO/whisper-small-int8-ov", str(ctx.exception))
+
+    def test_resolve_ct2_error_mentions_download_model_sh(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(RuntimeError) as ctx:
+                engine.resolve_model_path("large-v3", base=root)
+            self.assertIn("./download-model.sh large-v3", str(ctx.exception))
+
+    def test_resolve_ov_layout_ignores_ct2_only_snapshot(self):
+        # ct2 布局快照(model.bin)不应被 ov 谓词误认
+        with tempfile.TemporaryDirectory() as root:
+            snap = os.path.join(root, "snapshots", "dl")
+            os.makedirs(snap)
+            open(os.path.join(snap, "model.bin"), "wb").close()
+            with self.assertRaises(RuntimeError):
+                engine.resolve_model_path("small-int8-ov", base=os.path.join(root, "snapshots"), layout="ov")
+
+    def test_resolve_unknown_layout(self):
+        with self.assertRaises(ValueError):
+            engine.resolve_model_path("x", base="/tmp", layout="onnx")
+
+
 if __name__ == "__main__":
     unittest.main()

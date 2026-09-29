@@ -23,6 +23,9 @@ ENV_MODEL = "VOICE_INPUT_MODEL"
 DEFAULT_ENGINE = "cuda"
 DEFAULT_MODEL = "large-v3"
 
+# engine=npu 时进程启动前置库目录(ze 驱动库;OmniBook/Arch 本机已验证)
+NPU_LIB_DIR = "/usr/lib/x86_64-linux-gnu"
+
 
 def model_name(env: dict) -> str:
     """VOICE_INPUT_MODEL -> 模型名,默认 "large-v3"。
@@ -74,24 +77,117 @@ def snapshots_base(model: str) -> str:
     )
 
 
-def resolve_model_path(model: str = None, base: str = None) -> str:
-    """选第一个含 model.bin 的快照子目录(#11 逻辑按模型名泛化)。
+def required_lib_paths(engine: str, site_packages: str = None) -> list:
+    """引擎 -> 进程启动前置库路径列表(#19 收敛 5+1 份拷贝的单点)。
 
-    兼容 huggingface_hub 的哈希目录与 download-model.sh 的 `downloaded` 目录,
-    新装无需手工改名。base 可注入供单测造布局;找不到抛 RuntimeError,
-    错误信息带模型名与下载命令(可行动)。
+    cuda/auto: venv nvidia pip 库三件套(与历史拷贝逐字同序,A4 钉死);
+    npu: ze 驱动库目录(ld.so 只在进程启动读 LD_LIBRARY_PATH);
+    cpu: 无。site_packages 为 None 时 cuda/auto 抛 ValueError(宁可报错不静默算错)。
     """
+    _validated_engine(engine)
+    if engine in ("cuda", "auto"):
+        if not site_packages:
+            raise ValueError(
+                "[voice-input] required_lib_paths: cuda/auto requires site_packages "
+                "(venv site-packages dir)"
+            )
+        return [
+            f"{site_packages}/nvidia/cublas/lib",
+            f"{site_packages}/nvidia/cudnn/lib",
+            f"{site_packages}/nvidia/cuda_nvrtc/lib",
+        ]
+    if engine == "npu":
+        return [NPU_LIB_DIR]
+    return []
+
+
+def has_library_paths(env: dict, paths: list) -> bool:
+    """paths 是否已全部在 env 的 LD_LIBRARY_PATH 中(分量精确匹配)。
+
+    精确分量匹配防兄弟目录误判(/usr/lib/x86_64-linux-gnu-extras 不算包含)。
+    """
+    present = [p for p in env.get("LD_LIBRARY_PATH", "").split(os.pathsep) if p]
+    return all(p in present for p in paths)
+
+
+def prepend_library_path(env: dict, paths: list) -> str:
+    """在传入 env dict 上前置 paths 到 LD_LIBRARY_PATH,返回新值。幂等。
+
+    只操作传入 dict(不写 os.environ,可测)。已含分量不重复拼——HEAD 会重复
+    追加,去重对 ld.so 语义等价(spec Design #4 惰性差异声明)。
+    """
+    old = env.get("LD_LIBRARY_PATH", "")
+    missing = [p for p in paths if not has_library_paths(env, [p])]
+    if not missing:
+        env["LD_LIBRARY_PATH"] = old
+        return old
+    prefix = os.pathsep.join(missing)
+    env["LD_LIBRARY_PATH"] = f"{prefix}{os.pathsep}{old}" if old else prefix
+    return env["LD_LIBRARY_PATH"]
+
+
+def default_model(engine: str) -> str:
+    """引擎感知的默认模型名单点:npu -> small-int8-ov(OpenVINO 格式),其他 -> large-v3。
+
+    build_model 与 shell 预检共用;不设 VOICE_INPUT_MODEL 时 npu 不会错找
+    不存在的 OpenVINO/whisper-large-v3。#16 契约(cuda 默认 large-v3)不动。
+    """
+    _validated_engine(engine)
+    return "small-int8-ov" if engine == "npu" else DEFAULT_MODEL
+
+
+def ov_snapshots_base(model: str) -> str:
+    """OpenVINO 模型的 HF hub snapshots 目录(仅拼路径,不检查存在性)。"""
+    return os.path.expanduser(
+        f"~/.cache/huggingface/hub/models--OpenVINO--whisper-{model}/snapshots"
+    )
+
+
+def child_env(env: dict) -> dict:
+    """spawn transcribe 子进程用的 env(voice_hold 唯一注入点)。
+
+    npu 时 prepend NPU 库目录(ld.so 进程启动前置,进程内改无效——KB 实证);
+    其他引擎/非法引擎原样拷贝放行,由 transcribe_once 的进程内 preamble 与
+    可行动报错维持现状错误路径。
+    """
+    out = dict(env)
+    try:
+        eng = engine_name(out)
+    except ValueError:
+        return out
+    if eng == "npu":
+        out["LD_LIBRARY_PATH"] = prepend_library_path(out, required_lib_paths("npu"))
+    return out
+
+
+# 布局谓词:快照子目录含此文件才算对应格式的有效模型
+_LAYOUT_PREDICATE = {"ct2": "model.bin", "ov": "openvino_encoder_model.xml"}
+
+
+def resolve_model_path(model: str = None, base: str = None, layout: str = "ct2") -> str:
+    """选第一个含布局谓词文件的快照子目录(#11 逻辑按模型名+格式泛化)。
+
+    layout="ct2"(默认):谓词 model.bin,与历史行为逐字一致(A5 契约);
+    layout="ov":谓词 openvino_encoder_model.xml(OpenVINO/GenAI 布局)。
+    base 可注入供单测造布局;找不到抛 RuntimeError,错误信息按布局区分
+    下载命令(ct2 -> download-model.sh;ov -> huggingface-cli)。
+    """
+    if layout not in _LAYOUT_PREDICATE:
+        raise ValueError(f"[voice-input] unknown model layout {layout!r}")
+    predicate = _LAYOUT_PREDICATE[layout]
     if model is None:
         model = model_name(os.environ)
     if base is None:
-        base = snapshots_base(model)
+        base = ov_snapshots_base(model) if layout == "ov" else snapshots_base(model)
     if os.path.isdir(base):
         for name in sorted(os.listdir(base)):
             cand = os.path.join(base, name)
-            if os.path.isfile(os.path.join(cand, "model.bin")):
+            if os.path.isfile(os.path.join(cand, predicate)):
                 return cand
+    hint = (f"./download-model.sh {model}" if layout == "ct2"
+            else f"huggingface-cli download OpenVINO/whisper-{model}")
     raise RuntimeError(
-        f"Whisper model '{model}' not found under {base} — run ./download-model.sh {model}"
+        f"Whisper model '{model}' ({layout}) not found under {base} — run {hint}"
     )
 
 
