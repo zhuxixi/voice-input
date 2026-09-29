@@ -12,8 +12,9 @@
 
 import os
 import sys
+from types import SimpleNamespace
 
-# npu 是占位:选择时合法,构造时 NotImplementedError(fail fast,见 #19)。
+# npu 已接入:OpenVINO GenAI 管线(build_model 的 adapter);cuda/cpu/auto 不变。
 VALID_ENGINES = ("cuda", "cpu", "auto", "npu")
 
 ENV_ENGINE = "VOICE_INPUT_ENGINE"
@@ -25,6 +26,9 @@ DEFAULT_MODEL = "large-v3"
 
 # engine=npu 时进程启动前置库目录(ze 驱动库;OmniBook/Arch 本机已验证)
 NPU_LIB_DIR = "/usr/lib/x86_64-linux-gnu"
+
+# NPU 静态编译缓存:冷 ~47s 一次性,热 0.8s 跨进程生效(2026-09-29 本机实测,#19)
+NPU_COMPILE_CACHE = os.path.expanduser("~/.cache/voice-input/npu-compile-cache")
 
 
 def model_name(env: dict) -> str:
@@ -57,14 +61,19 @@ def construction_kwargs(engine: str) -> dict:
     """引擎名 -> WhisperModel 构造参数(单一定义点,build_model 与 download-model.py 共用)。
 
     cuda 分支是 HEAD load_model 原文逐字搬移(#16 契约,勿改);auto 的首次尝试
-    与 cuda 同参;npu 尚无 faster-whisper 侧构造参数(#19 实现前 fail fast)。
+    与 cuda 同参;npu 无 faster-whisper 侧构造参数(OpenVINO 管线走 build_model)。
     """
     _validated_engine(engine)
     if engine in ("cuda", "auto"):  # auto 首次尝试即 cuda 参数(float16)
         return {"device": "cuda", "compute_type": "float16"}
     if engine == "cpu":
         return {"device": "cpu", "compute_type": "int8"}
-    raise NotImplementedError("NPU engine not implemented yet — see issue #19")
+    # npu 没有 faster-whisper 侧构造参数(OpenVINO 管线走 build_model 的 adapter)——
+    # "不适用"而非"未实现"(#19)
+    raise ValueError(
+        "[voice-input] npu engine has no faster-whisper construction kwargs; "
+        "use build_model() (OpenVINO pipeline)"
+    )
 
 
 def snapshots_base(model: str) -> str:
@@ -196,35 +205,39 @@ def _default_warn(message: str) -> None:
 
 
 def build_model(engine: str = None, model: str = None,
-                whisper_factory=None, warn=None):
-    """按引擎构造并返回 WhisperModel(cwd 环境变量决定 engine/model,可显式传参覆盖)。
+                whisper_factory=None, warn=None,
+                pipeline_factory=None, model_base: str = None):
+    """按引擎构造并返回转写模型(cwd 环境变量决定 engine/model,可显式传参覆盖)。
 
-    whisper_factory / warn 为单测注入缝:工厂未注入时才懒 import faster_whisper,
-    使本模块在被 import 时不拉起推理栈(无 GPU 机器可跑单测)。
+    whisper_factory / pipeline_factory / warn / model_base 为单测注入缝:
+    工厂未注入时才懒 import 对应推理栈,本模块被 import 时不拉起任何重依赖。
+    model_base 注入快照根目录(单测造布局);None 时行为与历史逐字一致。
 
     分支:
       cuda  构造参数是 HEAD load_model 原文逐字搬移(#16 契约,勿改)
       cpu   device="cpu", compute_type="int8"(无 NVIDIA 机器的兜底引擎)
       auto  先试 cuda,失败 warn 后降级 cpu int8(仅显式选用,默认不做)
-      npu   NotImplementedError(#19 实现前 fail fast)
+      npu   _NpuWhisperAdapter(openvino_genai WhisperPipeline,静态管线+编译缓存)
     """
     if engine is None:
         engine = engine_name(os.environ)
     else:
         _validated_engine(engine)
     if model is None:
-        model = model_name(os.environ)
-    if whisper_factory is None:
-        from faster_whisper import WhisperModel as whisper_factory
+        model = os.environ.get(ENV_MODEL, default_model(engine))
     if warn is None:
         warn = _default_warn
 
     if engine == "npu":
-        # 占位在解析模型前就 fail fast:「引擎未实现」与「模型在不在」无关,
-        # 先报真实阻断原因(#19 实现后此分支改为懒导入 openvino-genai 构造)。
-        raise NotImplementedError("NPU engine not implemented yet — see issue #19")
+        if pipeline_factory is None:
+            from openvino_genai import WhisperPipeline as pipeline_factory
+        path = resolve_model_path(model, base=model_base, layout="ov")
+        return _NpuWhisperAdapter(path, pipeline_factory, warn=warn)
 
-    path = resolve_model_path(model)
+    if whisper_factory is None:
+        from faster_whisper import WhisperModel as whisper_factory
+
+    path = resolve_model_path(model, base=model_base)
 
     if engine == "auto":
         try:
@@ -236,3 +249,78 @@ def build_model(engine: str = None, model: str = None,
             )
             return whisper_factory(path, **construction_kwargs("cpu"))
     return whisper_factory(path, **construction_kwargs(engine))
+
+
+def _load_wav_samples(path: str):
+    """wav(16-bit PCM) -> float32 采样序列(genai generate 的入参形态)。
+
+    校验先于 numpy 导入(拒绝路径不依赖重依赖);16-bit 硬校验沿 bench 语义
+    (24-bit 会被 int16 解读成垃圾样本且静默成功,必须硬拒)。
+    """
+    import wave
+
+    with wave.open(path) as w:
+        if w.getsampwidth() != 2:
+            raise ValueError(
+                f"wav 采样宽度 {w.getsampwidth()} 字节 ≠ 2(int16);"
+                "先转成 16kHz mono 16-bit(arecord -f S16_LE 即是)"
+            )
+        if w.getframerate() != 16000 or w.getnchannels() != 1:
+            print(
+                f"[voice-input] warn: wav 非 16kHz mono(实际 {w.getframerate()}Hz "
+                f"{w.getnchannels()}ch),whisper 内部会重采样",
+                file=sys.stderr,
+            )
+        data = w.readframes(w.getnframes())
+
+    import numpy as np  # 懒导入:模块顶层保持纯标准库
+
+    return np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+class _NpuWhisperAdapter:
+    """openvino_genai WhisperPipeline -> faster-whisper WhisperModel 形态适配(#19)。
+
+    暴露同签名 transcribe(),返回 (segments, info)——调用方(voice-ptt.py /
+    transcribe_once.py)零改动。NPU 静态管线 C++ 硬拒 initial_prompt/hotwords
+    (pipeline_static.cpp:1145),按 terms.py 原则降级告警、绝不阻断转写。
+    """
+
+    def __init__(self, model_dir: str, pipeline_factory, warn=None):
+        # NPU_PLATFORM: 驱动 1.38.0 仍不上报平台描述,AUTO_DETECT 失败(#17);
+        # STATIC_PIPELINE: NPU 官方要求;CACHE_DIR: 静态编译跨进程缓存
+        self._pipe = pipeline_factory(
+            model_dir,
+            device="NPU",
+            NPU_PLATFORM="NPU4000",
+            STATIC_PIPELINE=True,
+            CACHE_DIR=NPU_COMPILE_CACHE,
+        )
+        self._warn = warn if warn is not None else _default_warn
+
+    def transcribe(self, wav, language="zh", initial_prompt=None, hotwords=None,
+                   **_ignored):
+        if initial_prompt or hotwords:
+            self._warn(
+                "[voice-input] NPU engine: initial_prompt/hotwords not supported "
+                "by the static pipeline — terms degraded (ignored), "
+                "transcribing without them"
+            )
+        samples = _load_wav_samples(wav)
+        result = self._pipe.generate(samples, language=language)
+        text = self._extract_text(result)
+        segments = [SimpleNamespace(text=text)] if text else []
+        return segments, SimpleNamespace(language=language)
+
+    @staticmethod
+    def _extract_text(result) -> str:
+        """兼容 generate 返回值形态(str / .text / .texts 列表)。沿 bench 语义。"""
+        if isinstance(result, str):
+            return result.strip()
+        for attr in ("text", "texts"):
+            v = getattr(result, attr, None)
+            if isinstance(v, str):
+                return v.strip()
+            if isinstance(v, list):
+                return " ".join(str(x) for x in v).strip()
+        return str(result).strip()

@@ -135,11 +135,6 @@ class TestEngineValidation(unittest.TestCase):
                 engine.engine_name({"VOICE_INPUT_ENGINE": v}), v
             )
 
-    def test_npu_build_raises_not_implemented(self):
-        with self.assertRaises(NotImplementedError) as ctx:
-            engine.build_model(engine="npu", model="x")
-        self.assertIn("#19", str(ctx.exception))
-
     def test_build_model_direct_invalid_engine_raises(self):
         # 绕过 engine_name 显式传非法值 → 同样 fail fast
         with self.assertRaises(ValueError):
@@ -211,10 +206,11 @@ class TestConstructionKwargs(unittest.TestCase):
             engine.construction_kwargs("auto"), engine.construction_kwargs("cuda")
         )
 
-    def test_npu_raises_not_implemented(self):
-        with self.assertRaises(NotImplementedError) as ctx:
+    def test_construction_kwargs_npu_value_error(self):
+        # #19: npu 不再有 faster-whisper 构造参数——"不适用"而非"未实现"
+        with self.assertRaises(ValueError) as ctx:
             engine.construction_kwargs("npu")
-        self.assertIn("#19", str(ctx.exception))
+        self.assertIn("build_model", str(ctx.exception))
 
     def test_invalid_raises_value_error(self):
         with self.assertRaises(ValueError):
@@ -417,6 +413,167 @@ class TestOvResolve(unittest.TestCase):
     def test_resolve_unknown_layout(self):
         with self.assertRaises(ValueError):
             engine.resolve_model_path("x", base="/tmp", layout="onnx")
+
+
+class _FakeGenaiPipe:
+    """记录 generate 调用的假 WhisperPipeline(A1/A3 用,不碰 openvino_genai)。"""
+
+    def __init__(self, texts=("你好",)):
+        self.texts = list(texts)
+        self.generate_calls = []
+
+    def generate(self, samples, **kwargs):
+        self.generate_calls.append({"n_samples": len(samples), "kwargs": kwargs})
+        from types import SimpleNamespace
+        return SimpleNamespace(texts=self.texts)
+
+
+class _FakePipeFactory:
+    """记录构造 kwargs 的假 WhisperPipeline 工厂。"""
+
+    def __init__(self, pipe=None):
+        self.calls = []
+        self.pipe = pipe or _FakeGenaiPipe()
+
+    def __call__(self, model_dir, **kwargs):
+        self.calls.append({"model_dir": model_dir, "kwargs": kwargs})
+        return self.pipe
+
+
+def _make_ov_base(root: str, model: str = "small-int8-ov") -> str:
+    """tmpdir 造 OV 快照布局,返回 snapshots 目录(resolve_model_path base 注入)。"""
+    base = os.path.join(root, f"models--OpenVINO--whisper-{model}", "snapshots")
+    snap = os.path.join(base, "abc123")
+    os.makedirs(snap)
+    open(os.path.join(snap, "openvino_encoder_model.xml"), "wb").close()
+    return base
+
+
+def _write_wav(path: str, samples=((0, 16384, -16384)), rate=16000, width=2, channels=1):
+    import wave
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(width)
+        w.setframerate(rate)
+        if width == 2:
+            import struct
+            w.writeframes(b"".join(struct.pack("<h", s) for s in samples))
+        else:
+            w.writeframes(bytes(len(samples) * width * channels))
+
+
+class TestNpuConstruction(unittest.TestCase):
+    """#19 A1: npu 构造参数(device/NPU_PLATFORM/STATIC_PIPELINE/CACHE_DIR/模型路径)。"""
+
+    def test_npu_build_constructs_adapter_with_static_kwargs(self):
+        factory = _FakePipeFactory()
+        with tempfile.TemporaryDirectory() as root:
+            base = _make_ov_base(root)
+            m = engine.build_model(engine="npu", model="small-int8-ov",
+                                   pipeline_factory=factory, model_base=base)
+        self.assertIsInstance(m, engine._NpuWhisperAdapter)
+        self.assertEqual(len(factory.calls), 1)
+        call = factory.calls[0]
+        self.assertTrue(call["model_dir"].endswith("abc123"))
+        self.assertEqual(call["kwargs"], {
+            "device": "NPU",
+            "NPU_PLATFORM": "NPU4000",
+            "STATIC_PIPELINE": True,
+            "CACHE_DIR": engine.NPU_COMPILE_CACHE,
+        })
+
+    def test_npu_default_model_when_env_unset(self):
+        factory = _FakePipeFactory()
+        with tempfile.TemporaryDirectory() as root:
+            base = _make_ov_base(root)  # small-int8-ov 布局
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("VOICE_INPUT_MODEL", None)
+                engine.build_model(engine="npu", pipeline_factory=factory,
+                                   model_base=base)
+        self.assertIn("abc123", factory.calls[0]["model_dir"])
+
+    def test_npu_missing_model_actionable(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(RuntimeError) as ctx:
+                engine.build_model(engine="npu", model="small-int8-ov",
+                                   pipeline_factory=_FakePipeFactory(), model_base=root)
+            self.assertIn("huggingface-cli download", str(ctx.exception))
+
+
+class TestNpuAdapter(unittest.TestCase):
+    """#19 A3: adapter 兼容契约 / 热词降级 warn / wav 16-bit 硬校验。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.wav = os.path.join(self.tmp.name, "t.wav")
+        _write_wav(self.wav)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_adapter(self, texts=("你好",), pipe=None):
+        pipe = pipe or _FakeGenaiPipe(texts)
+        return engine._NpuWhisperAdapter("/fake/model", pipeline_factory=lambda d, **kw: pipe), pipe
+
+    def test_adapter_transcribe_contract(self):
+        adapter, pipe = self._make_adapter(texts=["你好", "世界"])
+        segments, info = adapter.transcribe(self.wav, language="zh")
+        self.assertEqual("".join(s.text for s in segments), "你好 世界")
+        self.assertEqual(info.language, "zh")
+        self.assertEqual(pipe.generate_calls[0]["kwargs"], {"language": "zh"})
+        self.assertEqual(pipe.generate_calls[0]["n_samples"], 3)
+
+    def test_adapter_empty_result_empty_segments(self):
+        adapter, _ = self._make_adapter(texts=[])
+        segments, info = adapter.transcribe(self.wav)
+        self.assertEqual(segments, [])
+
+    def test_adapter_hotword_degradation_warns(self):
+        warns = []
+        pipe = _FakeGenaiPipe()
+        adapter = engine._NpuWhisperAdapter(
+            "/fake/model", pipeline_factory=lambda d, **kw: pipe, warn=warns.append)
+        adapter.transcribe(self.wav, language="zh",
+                           initial_prompt="术语:重构", hotwords="HoloWord")
+        self.assertEqual(len(warns), 1)
+        self.assertIn("not supported", warns[0])
+        # generate 不得收到 initial_prompt/hotwords(NPU 静态管线 C++ 硬拒)
+        self.assertEqual(pipe.generate_calls[0]["kwargs"], {"language": "zh"})
+
+    def test_adapter_no_warn_without_prompt(self):
+        warns = []
+        pipe = _FakeGenaiPipe()
+        adapter = engine._NpuWhisperAdapter(
+            "/fake/model", pipeline_factory=lambda d, **kw: pipe, warn=warns.append)
+        adapter.transcribe(self.wav, language="zh")
+        self.assertEqual(warns, [])
+
+    def test_adapter_ignores_extra_kwargs(self):
+        adapter, pipe = self._make_adapter()
+        adapter.transcribe(self.wav, language="zh", beam_size=5, task="transcribe")
+        self.assertEqual(pipe.generate_calls[0]["kwargs"], {"language": "zh"})
+
+    def test_load_wav_samples_int16_normalized(self):
+        import numpy as np
+        arr = engine._load_wav_samples(self.wav)
+        self.assertEqual(arr.dtype, np.float32)
+        np.testing.assert_allclose(arr, [0.0, 0.5, -0.5], atol=1e-4)
+
+    def test_load_wav_samples_rejects_24bit(self):
+        wav24 = os.path.join(self.tmp.name, "24.wav")
+        _write_wav(wav24, width=3)
+        with self.assertRaises(ValueError) as ctx:
+            engine._load_wav_samples(wav24)
+        self.assertIn("采样宽度", str(ctx.exception))
+
+    def test_load_wav_samples_warns_non_16k(self):
+        import contextlib, io
+        wav8k = os.path.join(self.tmp.name, "8k.wav")
+        _write_wav(wav8k, rate=8000)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            engine._load_wav_samples(wav8k)
+        self.assertIn("重采样", buf.getvalue())
 
 
 if __name__ == "__main__":
