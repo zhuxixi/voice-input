@@ -30,12 +30,19 @@ if not _SITE or not os.path.isdir(_SITE):
         "see README Installation\n"
     )
     sys.exit(1)
-os.environ["LD_LIBRARY_PATH"] = (
-    f"{_SITE}/nvidia/cublas/lib:"
-    f"{_SITE}/nvidia/cudnn/lib:"
-    f"{_SITE}/nvidia/cuda_nvrtc/lib"
-    + (f':{os.environ.get("LD_LIBRARY_PATH", "")}')
-)
+# preamble 计算收敛到 engine.py 单点(#19 债①);cuda 下输出与历史逐字节一致
+# (A4 钉死)。engine 顶层纯标准库,先 import 再设置安全;真正生效的注入在
+# voice-ptt.sh(进程启动前置),本进程内设置只影响子进程继承
+import engine
+try:
+    os.environ["LD_LIBRARY_PATH"] = engine.prepend_library_path(
+        dict(os.environ),
+        engine.required_lib_paths(engine.engine_name(dict(os.environ)), _SITE),
+    )
+except ValueError as e:
+    # 非法引擎值:干净退出不裸 traceback(与 main() 内错误路径同款)
+    sys.stderr.write(f"[voice-input] {e}\n")
+    sys.exit(1)
 
 import threading
 import time
@@ -43,7 +50,6 @@ import signal
 from archive import archive_recording, ARCHIVE_ENABLED
 from media_pause import pause_playing, resume, PAUSE_MEDIA_ENABLED
 from terms import load_terms, build_prompt, build_transcribe_kwargs
-import engine
 import gi
 
 gi.require_version("Gtk", "3.0")
