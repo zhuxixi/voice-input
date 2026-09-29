@@ -160,12 +160,12 @@ class _NpuWhisperAdapter:
 
 | ID | 功能点 | 验收方式 | 具体验证 | 通过标准 |
 |----|--------|----------|----------|----------|
-| A1 | npu 构造参数正确（device/NPU_PLATFORM/STATIC_PIPELINE/CACHE_DIR/模型路径） | 自动化验证（unit） | `venv/bin/python3 -m unittest test_engine -v -k npu`（fake pipeline_factory 断言 kwargs） | 断言全过 |
-| A2 | OV 模型解析（default_model 矩阵/布局谓词/分布局错误信息） | 自动化验证（unit） | `venv/bin/python3 -m unittest test_engine -v -k ov_`（tmp_path 造 ct2/ov/空布局；default_model 引擎矩阵） | 断言全过 |
-| A3 | adapter 兼容契约：签名、segments/info 形状、文本拼接、热词降级 warn、wav 16-bit 硬校验 | 自动化验证（unit） | `venv/bin/python3 -m unittest test_engine -v -k adapter`（fake pipeline + tmp wav） | 断言全过 |
-| A4 | required_lib_paths 引擎矩阵（cuda 输出与历史硬编码字符串逐字节相等）+ prepend 幂等 + has_library_paths 谓词 + child_env（npu 注入/cpu 透传/非法引擎放行） | 自动化验证（unit） | `venv/bin/python3 -m unittest test_engine -v -k lib_paths` | 断言全过 |
+| A1 | npu 构造参数正确（device/NPU_PLATFORM/STATIC_PIPELINE/CACHE_DIR/模型路径） | 自动化验证（unit） | `venv/bin/python3 -m unittest test_engine.TestNpuConstruction -v`（fake pipeline_factory 断言 kwargs） | 断言全过 |
+| A2 | OV 模型解析（default_model 矩阵/布局谓词/分布局错误信息） | 自动化验证（unit） | `venv/bin/python3 -m unittest test_engine.TestOvResolve -v`（tmp_path 造 ct2/ov/空布局；default_model 引擎矩阵） | 断言全过 |
+| A3 | adapter 兼容契约：签名、segments/info 形状、文本拼接、热词降级 warn、wav 16-bit 硬校验 | 自动化验证（unit） | `venv/bin/python3 -m unittest test_engine.TestNpuAdapter -v`（fake pipeline + tmp wav） | 断言全过 |
+| A4 | required_lib_paths 引擎矩阵（cuda 输出与历史硬编码字符串逐字节相等）+ prepend 幂等 + has_library_paths 谓词 + child_env（npu 注入/cpu 透传/非法引擎放行） | 自动化验证（unit） | `venv/bin/python3 -m unittest test_engine.TestLibPaths -v` | 断言全过 |
 | A5 | 既有行为不变（cuda/cpu/auto/ct2/默认值/bench） | 自动化验证（unit，既有契约） | `venv/bin/python3 -m unittest test_engine test_terms test_archive test_bench -v`（全量回归） | 全绿（npu 占位契约测试按新契约改写：build_model('npu') 构造 adapter、construction_kwargs('npu')→ValueError，其余既有测试不变） |
-| A6 | transcribe_once preamble 收敛后输出等价 + npu 缺路径报错 | 自动化验证（integration） | `venv/bin/python3 -m unittest test_engine -v -k transcribe_once_env`（子进程 harness：设/不设 env 的行为） | 断言全过 |
+| A6 | transcribe_once preamble 收敛后输出等价 + npu 缺路径报错 | 自动化验证（integration） | `venv/bin/python3 -m unittest test_engine.TestTranscribeOnceEnv -v`（子进程 harness：设/不设 env 的行为） | 断言全过 |
 | A7 | 7700K 零行为变化证明 | 自动化验证（static） | 三项静态检查：git diff 无 voice-ptt.py 上屏段（xsel/xdotool 块）改动；voice-ptt.py 源内无硬编码 nvidia 库路径残留（已收敛为 engine 调用）；import engine 先于 preamble 设置（源顺序） | 三项全过（字节等价由 A4 的 cuda 历史字符串断言承担） |
 | A8 | shell wrappers 收敛后 cuda 段等价、npu 段正确 | 自动化验证（integration） | `bash -n`（语法）+ 子进程跑 wrapper 的 export 计算（注入 fake venv python） | 断言全过 |
 | U1 | OmniBook e2e：npu 听写 → Wayland 上屏；延迟数据 | 用户实测 | service 切 ENGINE=npu → 按住右 Alt 说 8s 中文 → 松开；计时 = journalctl -o short-precise 的 delivered 行时间戳与松手时刻差（辅以秒表），连续 5 次取中位；数据回贴 #19 | 文本上屏正确；热缓存单次端到端 ≤5s（目标 ~2s） |
