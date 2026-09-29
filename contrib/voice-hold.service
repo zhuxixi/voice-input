@@ -9,8 +9,13 @@ After=graphical-session.target
 
 [Service]
 ExecStart=/usr/bin/python3 %h/work/git-repo/voice-input/voice_hold.py
-Environment=VOICE_INPUT_ENGINE=cpu
-Environment=VOICE_INPUT_MODEL=small
+# NPU 引擎(#19):首次转写一次性静态编译 ~47s(默认超时 120s 兜得住),
+# 之后热缓存 ~1-2s/次;编译缓存 ~/.cache/voice-input/npu-compile-cache
+# (~850MB,可 rm 重建,代价是一次 47s 重编译)。
+# 无需 LD_LIBRARY_PATH——voice_hold 会给转写子进程自动注入。
+# cpu 备选(无 NPU 机器):VOICE_INPUT_ENGINE=cpu + VOICE_INPUT_MODEL=small
+Environment=VOICE_INPUT_ENGINE=npu
+Environment=VOICE_INPUT_MODEL=small-int8-ov
 Environment=VOICE_INPUT_TRANSCRIBE_TIMEOUT=120
 Restart=always
 RestartSec=3

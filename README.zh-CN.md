@@ -166,6 +166,26 @@ systemctl --user enable --now voice-hold.service
 | `VOICE_INPUT_WAYLAND_METHOD` | `paste` | Wayland 上屏方式：`paste` = 剪贴板粘贴（`wl-copy` + `ydotool` 组合键），`type` = 模拟打字 | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_WAYLAND_METHOD=type` |
 | `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | paste 方式的组合键（终端惯例；VS Code 等只认 `ctrl+v` 的应用改这个） | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_PASTE_COMBO=ctrl+v` |
 
+### NPU 引擎（Intel AI Boost，如 Lunar Lake）
+
+`VOICE_INPUT_ENGINE=npu` 经 openvino-genai 的 `WhisperPipeline`（静态管线）在 Intel
+NPU 上转写。OmniBook（Core Ultra 258V，whisper-small int8）实测：**8 秒语音约 0.3s，
+对比 CPU 约 3.4s——快约 12 倍**（基准见 #17）。
+
+三个前置（缺一不可）：NPU 驱动 ≥ 1.38.0；venv 装 `openvino` + `openvino-genai`；
+进程启动时 `LD_LIBRARY_PATH` 含 `/usr/lib/x86_64-linux-gnu`（三个 wrapper 与
+voice_hold 会自动注入；手工跑 CLI 需自己 export）。
+
+模型是 OpenVINO 格式（与 faster-whisper 模型分开）：
+`huggingface-cli download OpenVINO/whisper-small-int8-ov`；`engine=npu` 时
+`VOICE_INPUT_MODEL` 默认 `small-int8-ov`。
+
+注意：首次转写一次性静态编译约 47s（默认 120s 超时兜得住）；编译缓存
+`~/.cache/voice-input/npu-compile-cache`（约 850MB，可删，代价是一次 47s 重编译）
+让后续加载降到约 0.8s。热词（terms.json）在 NPU 静态管线上不支持：引擎告警后
+忽略热词继续转写，绝不阻断；Wayland 按住说话链路现状本就不接热词（不变）。
+每次听写仍有约 0.8s 加载（#18 的子进程架构），常驻转写 worker 见 #25。
+
 ### 自定义词汇（热词）
 
 `~/.config/voice-input/terms.json`：

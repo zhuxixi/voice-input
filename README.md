@@ -189,6 +189,42 @@ All settings with their defaults and how to change them:
 | `VOICE_INPUT_WAYLAND_METHOD` | `paste` | Wayland text delivery: `paste` = clipboard paste (`wl-copy` + `ydotool` combo), `type` = simulated typing | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_WAYLAND_METHOD=type` |
 | `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | Paste key combo for the Wayland paste method (terminal convention; use `ctrl+v` for apps like VS Code that only bind plain paste) | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_PASTE_COMBO=ctrl+v` |
 
+### NPU engine (Intel AI Boost, e.g. Lunar Lake)
+
+`VOICE_INPUT_ENGINE=npu` transcribes on the Intel NPU via openvino-genai's
+`WhisperPipeline` (static pipeline). Measured on an OmniBook (Core Ultra 258V,
+whisper-small int8): **~0.3s per 8s dictation vs ~3.4s on CPU — about 12× faster**
+(benchmark: #17).
+
+Prerequisites (all three):
+
+- NPU driver ≥ 1.38.0 (`intel-npu-driver-bin`; older drivers fail at graph import)
+- `openvino` + `openvino-genai` in the venv (`venv/bin/pip install openvino openvino-genai`)
+- `LD_LIBRARY_PATH` containing `/usr/lib/x86_64-linux-gnu` **at process start** —
+  voice-ptt.sh / voice-toggle.sh / voice_hold inject it automatically. For direct
+  CLI use: `export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}`
+
+Model (OpenVINO format — separate from the faster-whisper models):
+
+```bash
+huggingface-cli download OpenVINO/whisper-small-int8-ov
+```
+
+Under `engine=npu`, `VOICE_INPUT_MODEL` defaults to `small-int8-ov`.
+
+Notes:
+
+- The first transcription compiles the static pipeline once (~47s, within the
+  default 120s timeout). A compile cache (`~/.cache/voice-input/npu-compile-cache`,
+  ~850MB) cuts later model loads to ~0.8s. Safe to delete — rebuilt on next run
+  (one 47s recompile).
+- Hotwords (`terms.json`) are NOT supported by the NPU static pipeline: the engine
+  prints a warning and transcribes without them (never blocks dictation). On the
+  Wayland hold-to-talk path, hotwords are not wired at all (transcribe_once.py does
+  not load terms — pre-existing behavior, unchanged).
+- Each dictation still pays ~0.8s model load (subprocess-per-dictation design, #18);
+  a resident transcription worker is tracked as #25.
+
 ### Custom vocabulary (hotwords)
 
 `~/.config/voice-input/terms.json`:
