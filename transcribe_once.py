@@ -18,9 +18,9 @@ VENV = os.path.join(_REPO_DIR, "venv")
 
 # Ask the venv's own interpreter where its site-packages are (#11): survives
 # in-place venv rebuilds that would leave a stale lib/python3.x dir behind.
-# 与 voice-ptt.py 同源的守卫 + nvidia 库路径块(#16 契约:cuda 机器直呼本 CLI 也
-# 能找到 cublas/cudnn;无 nvidia 库的机器这些路径不存在,LD_LIBRARY_PATH 里
-# 挂着无害)。
+# 与 voice-ptt.py 同源的 venv 守卫(#16)。库路径前置自 #19 起收敛到
+# engine.py 按引擎计算(cuda/auto -> nvidia pip 三路径,与历史逐字节一致;
+# cpu -> 无;npu -> ze 驱动库目录且必须进程启动时已在)。
 try:
     _SITE = subprocess.check_output(
         [
@@ -55,7 +55,7 @@ if _ENG == "npu" and not engine.has_library_paths(dict(os.environ), _LIB_PATHS):
     sys.stderr.write(
         "[voice-input] NPU engine requires LD_LIBRARY_PATH to contain "
         f"{engine.NPU_LIB_DIR} at process start (ld.so reads it once).\n"
-        "  export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu"
+        f"  export LD_LIBRARY_PATH={engine.NPU_LIB_DIR}"
         "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n"
         "  or launch via voice-ptt.sh / voice-toggle.sh / voice_hold "
         "(they inject it).\n"

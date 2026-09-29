@@ -224,14 +224,14 @@ def build_model(engine: str = None, model: str = None,
     else:
         _validated_engine(engine)
     if model is None:
-        model = os.environ.get(ENV_MODEL, default_model(engine))
+        model = os.environ.get(ENV_MODEL) or default_model(engine)
     if warn is None:
         warn = _default_warn
 
     if engine == "npu":
+        path = resolve_model_path(model, base=model_base, layout="ov")
         if pipeline_factory is None:
             from openvino_genai import WhisperPipeline as pipeline_factory
-        path = resolve_model_path(model, base=model_base, layout="ov")
         return _NpuWhisperAdapter(path, pipeline_factory, warn=warn)
 
     if whisper_factory is None:
