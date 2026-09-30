@@ -165,6 +165,14 @@ def stop_recording():
     recording = False
     wav = WAVFILE  # snapshot: a fast re-press during the 0.3s settle must
                    # not swap the path under this transcription (#28)
+    if not wav:
+        # mkstemp 在 start_recording 里抛 OSError 时(ENOSPC/EACCES/EMFILE),
+        # recording 已置 True 而路径为 None——此刻无 arecord/媒体/浮层需要收尾
+        # (它们都在 mkstemp 之后才启动),直接返回恢复状态;否则下次按键
+        # os.path.exists(None) 抛 TypeError,PTT 热键死到进程重启(CR r1)。
+        print("[voice-input] no recording path (start failed earlier)",
+              file=sys.stderr)
+        return
     # 局部快照 rec_proc:terminate 目标用局部 rec,避免 clobber 快速重录时 press2
     # 写入的新 arecord(cc#7)。不置 rec_proc=None(同因);全局由下次 start 覆盖。
     rec = rec_proc
