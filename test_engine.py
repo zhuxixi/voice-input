@@ -478,9 +478,9 @@ class TestNpuPipelineKwargs(unittest.TestCase):
 
 
 class TestNpuConstruction(unittest.TestCase):
-    """#19 A1: npu 构造参数(device/NPU_PLATFORM/STATIC_PIPELINE/CACHE_DIR/模型路径)。"""
+    """#19 A1 / #27 A1: npu 构造参数(device/NPU_PLATFORM/word_timestamps/CACHE_DIR/模型路径)。"""
 
-    def test_npu_build_constructs_adapter_with_static_kwargs(self):
+    def test_npu_build_constructs_stateful_pipeline_kwargs(self):
         factory = _FakePipeFactory()
         with tempfile.TemporaryDirectory() as root:
             base = _make_ov_base(root)
@@ -490,11 +490,10 @@ class TestNpuConstruction(unittest.TestCase):
         self.assertEqual(len(factory.calls), 1)
         call = factory.calls[0]
         self.assertTrue(call["model_dir"].endswith("abc123"))
+        # stateful 管线(#27):无 STATIC_PIPELINE,构造期 word_timestamps=True
         self.assertEqual(call["kwargs"], {
             "device": "NPU",
-            "NPU_PLATFORM": "NPU4000",
-            "STATIC_PIPELINE": True,
-            "CACHE_DIR": engine.NPU_COMPILE_CACHE,
+            **engine.npu_pipeline_kwargs(),
         })
 
     def test_npu_default_model_when_env_unset(self):
@@ -516,7 +515,7 @@ class TestNpuConstruction(unittest.TestCase):
 
 
 class TestNpuAdapter(unittest.TestCase):
-    """#19 A3: adapter 兼容契约 / 热词降级 warn / wav 16-bit 硬校验。"""
+    """#19 A3 / #27 A2: adapter 兼容契约 / 提示词透传 / wav 16-bit 硬校验。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -543,25 +542,29 @@ class TestNpuAdapter(unittest.TestCase):
         segments, info = adapter.transcribe(self.wav)
         self.assertEqual(segments, [])
 
-    def test_adapter_hotword_degradation_warns(self):
-        warns = []
+    def test_adapter_forwards_prompt_and_hotwords(self):
         pipe = _FakeGenaiPipe()
         adapter = engine._NpuWhisperAdapter(
-            "/fake/model", pipeline_factory=lambda d, **kw: pipe, warn=warns.append)
+            "/fake/model", pipeline_factory=lambda d, **kw: pipe)
         adapter.transcribe(self.wav, language="zh",
-                           initial_prompt="术语:重构", hotwords="HoloWord")
-        self.assertEqual(len(warns), 1)
-        self.assertIn("not supported", warns[0])
-        # generate 不得收到 initial_prompt/hotwords(NPU 静态管线 C++ 硬拒)
+                           initial_prompt="术语:重构", hotwords="zima jfox")
+        # stateful 管线支持提示词(#27):原样透传给 generate
+        self.assertEqual(pipe.generate_calls[0]["kwargs"], {
+            "language": "zh",
+            "initial_prompt": "术语:重构",
+            "hotwords": "zima jfox",
+        })
+
+    def test_adapter_omits_absent_prompt_kwargs(self):
+        adapter, pipe = self._make_adapter()
+        adapter.transcribe(self.wav, language="zh")
         self.assertEqual(pipe.generate_calls[0]["kwargs"], {"language": "zh"})
 
-    def test_adapter_no_warn_without_prompt(self):
-        warns = []
-        pipe = _FakeGenaiPipe()
-        adapter = engine._NpuWhisperAdapter(
-            "/fake/model", pipeline_factory=lambda d, **kw: pipe, warn=warns.append)
-        adapter.transcribe(self.wav, language="zh")
-        self.assertEqual(warns, [])
+    def test_adapter_empty_string_prompt_not_forwarded(self):
+        # 空串不透传:stateful 管线对任何已设值都会在 roi 检查崩溃(#27 R3)
+        adapter, pipe = self._make_adapter()
+        adapter.transcribe(self.wav, language="zh", initial_prompt="", hotwords="")
+        self.assertEqual(pipe.generate_calls[0]["kwargs"], {"language": "zh"})
 
     def test_adapter_ignores_extra_kwargs(self):
         adapter, pipe = self._make_adapter()

@@ -27,7 +27,9 @@ DEFAULT_MODEL = "large-v3"
 # engine=npu 时进程启动前置库目录(ze 驱动库;OmniBook/Arch 本机已验证)
 NPU_LIB_DIR = "/usr/lib/x86_64-linux-gnu"
 
-# NPU 静态编译缓存:冷 ~47s 一次性,热 0.8s 跨进程生效(2026-09-29 本机实测,#19)
+# NPU 编译缓存:stateful+word_timestamps 条目冷 ~155s 一次性,热 ~1.4s 跨进程
+# 生效;目录总量 ~2.4GB(含历史静态管线条目,可整目录 rm 重建,代价一次冷编译)
+# (2026-09-30 本机实测,#27)
 NPU_COMPILE_CACHE = os.path.expanduser("~/.cache/voice-input/npu-compile-cache")
 
 
@@ -232,7 +234,7 @@ def build_model(engine: str = None, model: str = None,
       cuda  构造参数是 HEAD load_model 原文逐字搬移(#16 契约,勿改)
       cpu   device="cpu", compute_type="int8"(无 NVIDIA 机器的兜底引擎)
       auto  先试 cuda,失败 warn 后降级 cpu int8(仅显式选用,默认不做)
-      npu   _NpuWhisperAdapter(openvino_genai WhisperPipeline,静态管线+编译缓存)
+      npu   _NpuWhisperAdapter(openvino_genai WhisperPipeline,stateful+word_timestamps+编译缓存)
     """
     if engine is None:
         engine = engine_name(os.environ)
@@ -247,7 +249,7 @@ def build_model(engine: str = None, model: str = None,
         path = resolve_model_path(model, base=model_base, layout="ov")
         if pipeline_factory is None:
             from openvino_genai import WhisperPipeline as pipeline_factory
-        return _NpuWhisperAdapter(path, pipeline_factory, warn=warn)
+        return _NpuWhisperAdapter(path, pipeline_factory)
 
     if whisper_factory is None:
         from faster_whisper import WhisperModel as whisper_factory
@@ -297,32 +299,28 @@ class _NpuWhisperAdapter:
     """openvino_genai WhisperPipeline -> faster-whisper WhisperModel 形态适配(#19)。
 
     暴露同签名 transcribe(),返回 (segments, info)——调用方(voice-ptt.py /
-    transcribe_once.py)零改动。NPU 静态管线 C++ 硬拒 initial_prompt/hotwords
-    (pipeline_static.cpp:1145),按 terms.py 原则降级告警、绝不阻断转写。
+    transcribe_once.py)零改动。#27 起 stateful 管线 + 构造期 word_timestamps=True,
+    initial_prompt/hotwords 直通 generate(静态管线的硬拒与降级告警已随
+    STATIC_PIPELINE 一并移除)。
     """
 
-    def __init__(self, model_dir: str, pipeline_factory, warn=None):
-        # NPU_PLATFORM: 驱动 1.38.0 仍不上报平台描述,AUTO_DETECT 失败(#17);
-        # STATIC_PIPELINE: NPU 官方要求;CACHE_DIR: 静态编译跨进程缓存
-        self._pipe = pipeline_factory(
-            model_dir,
-            device="NPU",
-            NPU_PLATFORM="NPU4000",
-            STATIC_PIPELINE=True,
-            CACHE_DIR=NPU_COMPILE_CACHE,
-        )
-        self._warn = warn if warn is not None else _default_warn
+    def __init__(self, model_dir: str, pipeline_factory):
+        # stateful 管线(NPU 默认)+ 构造期 word_timestamps(#27):决定 decoder
+        # SDPA 分解与输入形状,使 initial_prompt/hotwords 可用;CACHE_DIR:
+        # 编译跨进程缓存
+        self._pipe = pipeline_factory(model_dir, device="NPU",
+                                      **npu_pipeline_kwargs())
 
     def transcribe(self, wav, language="zh", initial_prompt=None, hotwords=None,
                    **_ignored):
-        if initial_prompt or hotwords:
-            self._warn(
-                "[voice-input] NPU engine: initial_prompt/hotwords not supported "
-                "by the static pipeline — terms degraded (ignored), "
-                "transcribing without them"
-            )
+        # truthy 判断:None/空串不透传——stateful 管线对任何已设值都会崩(#27 R3)
+        gen_kwargs = {}
+        if initial_prompt:
+            gen_kwargs["initial_prompt"] = initial_prompt
+        if hotwords:
+            gen_kwargs["hotwords"] = hotwords
         samples = _load_wav_samples(wav)
-        result = self._pipe.generate(samples, language=language)
+        result = self._pipe.generate(samples, language=language, **gen_kwargs)
         text = self._extract_text(result)
         segments = [SimpleNamespace(text=text)] if text else []
         return segments, SimpleNamespace(language=language)
