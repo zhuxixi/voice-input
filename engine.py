@@ -31,6 +31,21 @@ NPU_LIB_DIR = "/usr/lib/x86_64-linux-gnu"
 NPU_COMPILE_CACHE = os.path.expanduser("~/.cache/voice-input/npu-compile-cache")
 
 
+def npu_pipeline_kwargs() -> dict:
+    """npu 构造参数单一定义点(#27):stateful 管线 + word_timestamps=True。
+
+    不含 STATIC_PIPELINE:NPU 默认即 stateful;显式 True 会走带断言的静态
+    管线,硬拒 initial_prompt/hotwords。word_timestamps 必须构造期传入:
+    它决定 decoder 的 SDPA 分解与输入形状(pipeline.cpp:98-114),构造后
+    在 generate() 传无效且会崩(连空串都崩,#27 调研 R3)。
+    """
+    return {
+        "NPU_PLATFORM": "NPU4000",
+        "word_timestamps": True,
+        "CACHE_DIR": NPU_COMPILE_CACHE,
+    }
+
+
 def model_name(env: dict) -> str:
     """VOICE_INPUT_MODEL -> 模型名,默认 "large-v3"。
 

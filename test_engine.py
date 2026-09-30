@@ -462,6 +462,21 @@ def _write_wav(path: str, samples=((0, 16384, -16384)), rate=16000, width=2, cha
             w.writeframes(bytes(len(samples) * width * channels))
 
 
+class TestNpuPipelineKwargs(unittest.TestCase):
+    """#27 A1: npu 构造参数单一定义点(stateful 管线 + word_timestamps)。"""
+
+    def test_kwargs_contract(self):
+        kwargs = engine.npu_pipeline_kwargs()
+        self.assertEqual(kwargs, {
+            "NPU_PLATFORM": "NPU4000",
+            "word_timestamps": True,
+            "CACHE_DIR": engine.NPU_COMPILE_CACHE,
+        })
+        # STATIC_PIPELINE 必须不存在:显式 True 会走带断言的静态管线(spec D1)
+        self.assertNotIn("STATIC_PIPELINE", kwargs)
+        self.assertIs(kwargs["word_timestamps"], True)
+
+
 class TestNpuConstruction(unittest.TestCase):
     """#19 A1: npu 构造参数(device/NPU_PLATFORM/STATIC_PIPELINE/CACHE_DIR/模型路径)。"""
 
