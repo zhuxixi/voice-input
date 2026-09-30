@@ -175,7 +175,7 @@ Known limitations (Wayland):
   then `systemctl --user daemon-reload && systemctl --user restart ydotool`.
 - Transcription is bounded by `VOICE_INPUT_TRANSCRIBE_TIMEOUT` (default 120s):
   a hung child is killed and the hotkey keeps working instead of freezing
-  forever.
+  forever. For the first NPU run after a cache wipe use ≥240s (cold compile).
 
 ## Configuration
 
@@ -192,9 +192,11 @@ All settings with their defaults and how to change them:
 ### NPU engine (Intel AI Boost, e.g. Lunar Lake)
 
 `VOICE_INPUT_ENGINE=npu` transcribes on the Intel NPU via openvino-genai's
-`WhisperPipeline` (static pipeline). Measured on an OmniBook (Core Ultra 258V,
-whisper-small int8): **~0.3s per 8s dictation vs ~3.4s on CPU — about 12× faster**
-(benchmark: #17).
+`WhisperPipeline` — the stateful pipeline built with `word_timestamps=True`,
+which is what makes `initial_prompt`/`hotwords` work on NPU (#27). Measured on
+an OmniBook (Core Ultra 258V, whisper-small int8): **~1.0s per 8s dictation
+with the term list applied** (the previous static pipeline did ~0.3s but cannot
+carry hotwords), plus ~1.4s model load per dictation.
 
 Prerequisites (all three):
 
@@ -214,16 +216,18 @@ Under `engine=npu`, `VOICE_INPUT_MODEL` defaults to `small-int8-ov`.
 
 Notes:
 
-- The first transcription compiles the static pipeline once (~47s, within the
-  default 120s timeout). A compile cache (`~/.cache/voice-input/npu-compile-cache`,
-  ~850MB) cuts later model loads to ~0.8s. Safe to delete — rebuilt on next run
-  (one 47s recompile).
-- Hotwords (`terms.json`) are NOT supported by the NPU static pipeline: the engine
-  prints a warning and transcribes without them (never blocks dictation). On the
-  Wayland hold-to-talk path, hotwords are not wired at all (transcribe_once.py does
-  not load terms — pre-existing behavior, unchanged).
-- Each dictation still pays ~0.8s model load (subprocess-per-dictation design, #18);
-  a resident transcription worker is tracked as #25.
+- The first transcription compiles the pipeline once (**~155s** — use
+  `VOICE_INPUT_TRANSCRIBE_TIMEOUT` ≥ 240 for the first run; the bundled example
+  service already sets 240). A compile cache
+  (`~/.cache/voice-input/npu-compile-cache`, ~2.4GB incl. legacy entries) cuts
+  later model loads to ~1.4s. Safe to delete — rebuilt on next run (one ~155s
+  recompile).
+- Hotwords (`terms.json`) **are supported on NPU** since #27 (stateful pipeline
+  + construction-time `word_timestamps`). They are a probabilistic bias, not a
+  guarantee — they can occasionally change nearby common words too. The Wayland
+  hold-to-talk path picks them up via transcribe_once.py.
+- Each dictation still pays ~1.4s model load (subprocess-per-dictation design,
+  #18); a resident transcription worker is tracked as #25.
 
 ### Custom vocabulary (hotwords)
 
@@ -243,6 +247,8 @@ Notes:
   faster-whisper's `hotwords` parameter.
 - **Robustness**: a missing, malformed, or non-UTF-8 `terms.json` never breaks
   transcription — the program degrades to plain transcription and logs a warning.
+- Works on every engine: cuda/cpu (faster-whisper) and npu (stateful pipeline,
+  #27).
 
 ## How It Works
 
