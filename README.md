@@ -221,10 +221,12 @@ Notes:
   service already sets 240). A compile cache
   (`~/.cache/voice-input/npu-compile-cache`, ~2.4GB incl. legacy entries) cuts
   later model loads to ~1.4s. Safe to delete — rebuilt on next run (one ~155s
-  recompile).
+  recompile). Warm it up first by running `./test-mic.sh` once, or just accept
+  one slow first dictation.
 - Hotwords (`terms.json`) **are supported on NPU** since #27 (stateful pipeline
   + construction-time `word_timestamps`). They are a probabilistic bias, not a
-  guarantee — they can occasionally change nearby common words too. The Wayland
+  guarantee — they can occasionally change nearby common words too (observed
+  example: 语音 → 语言). The Wayland
   hold-to-talk path picks them up via transcribe_once.py.
 - Each dictation still pays ~1.4s model load (subprocess-per-dictation design,
   #18); a resident transcription worker is tracked as #25.

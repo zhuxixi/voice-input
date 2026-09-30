@@ -185,8 +185,9 @@ voice_hold 会自动注入；手工跑 CLI 需自己 export）。
 注意：首次转写一次性冷编译约 **155s**（首次运行把 `VOICE_INPUT_TRANSCRIBE_TIMEOUT`
 设 ≥240——仓库示例服务已设 240）；编译缓存 `~/.cache/voice-input/npu-compile-cache`
 （约 2.4GB，含历史条目；可整目录删，代价一次 155s 重编译）让后续加载降到约 1.4s。
+可先跑一次 `./test-mic.sh` 预热，或接受第一次听写较慢。
 热词（terms.json）自 #27 起 **NPU 支持**（stateful 管线 + 构造期 word_timestamps）；
-热词是概率性软引导而非保证，偶尔也会改动附近的常用词。Wayland 按住说话链路经
+热词是概率性软引导而非保证，偶尔也会改动附近的常用词（实测例：语音 → 语言）。Wayland 按住说话链路经
 transcribe_once.py 自动吃到词表。每次听写仍有约 1.4s 加载（#18 子进程架构），
 常驻转写 worker 见 #25。
 
