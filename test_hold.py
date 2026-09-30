@@ -355,6 +355,34 @@ class TestSingletonLock(unittest.TestCase):
         self.assertIsNone(res2[1])
         self.assertTrue(res2[2])
 
+    # A4 — real second process, with the B2 ready-line handshake: asserting
+    # before the child provably holds the lock would race its flock and
+    # flip the assertion (chronic-flaky classic, cf. pi-agent-board #95)
+    def test_cross_process_mutex(self):
+        path = self._path()
+        code = (
+            "import sys, time; sys.path.insert(0, %r); import voice_hold;"
+            "fd, _, _ = voice_hold.acquire_singleton_lock(%r);"
+            "assert fd is not None, 'child failed to acquire';"
+            "print('ready', flush=True); time.sleep(30)"
+        ) % (REPO, path)
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.PIPE, text=True, cwd=REPO)
+        try:
+            self.assertEqual(proc.stdout.readline().strip(), "ready")
+            fd, holder, err = voice_hold.acquire_singleton_lock(path)
+            self.assertIsNone(fd)
+            self.assertIsNone(err)
+            self.assertEqual(holder, proc.pid)
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)  # the flock dies with the child
+        fd2, holder2, err2 = voice_hold.acquire_singleton_lock(path)
+        self.assertIsNotNone(fd2)  # A3 semantics across processes
+        self.assertIsNone(err2)
+        os.close(fd2)
+
 
 if __name__ == "__main__":
     unittest.main()
