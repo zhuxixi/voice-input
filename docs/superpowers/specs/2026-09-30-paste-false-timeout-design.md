@@ -4,7 +4,7 @@ Issue: zhuxixi/voice-input#29 · 日期：2026-09-30 · 状态：**approved（20
 
 ## 背景与根因（一句话）
 
-`voice_hold._deliver()` 用 `stderr=subprocess.PIPE` 等待 paste.py，而 wl-copy 派生的常驻剪贴板进程继承管道写端使 EOF 永不到来 → 30s 假超时 → 忙态按键被静默丢弃 35–40s（用户感受「按住 Alt 没反应」，24h 内 51% 命中）。完整机制与证据见 issue #29 正文及 `research/root-cause-and-contracts.md`。
+`voice_hold._deliver()` 用 `stderr=subprocess.PIPE` 等待 paste.py，而 wl-copy 派生的常驻剪贴板进程继承管道写端使 EOF 永不到来 → 30s 假超时 → 忙态按键被静默丢弃 35–40s（用户感受「按住 Alt 没反应」，24h 内 51% 命中）。完整机制与证据见 issue #29 正文。
 
 ## 设计决策
 

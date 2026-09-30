@@ -41,7 +41,7 @@
 
 **Interfaces:**
 - Consumes: none (first task).
-- Produces: `PASTE_TIMEOUT: int` (module constant, value 10); `HoldDaemon._spawn_paste(self, text: str) -> tuple[int | None, bool]` returning `(returncode, timed_out)`; `HoldDaemon._paste_and_report(self, text: str) -> None`. Task 2 does not consume these.
+- Produces: `PASTE_TIMEOUT: int` (module constant, value 10); `HoldDaemon._spawn_paste(self, text)` returning `(returncode, timed_out)` (`None, True` on timeout); `HoldDaemon._paste_and_report(self, text)` (no return value). Task 2 does not consume these.
 
 - [ ] **Step 1: Write the failing tests**
 

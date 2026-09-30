@@ -206,9 +206,9 @@ class TestPasteSpawnContract(unittest.TestCase):
                     d._paste_and_report("hi")
                 out = err.getvalue()
                 self.assertIn(expect, out)
+                self.assertEqual(len(out.strip().splitlines()), 1)
                 if rc != 0:
                     self.assertNotIn("delivered:", out)
-                    self.assertEqual(len(out.strip().splitlines()), 1)
 
 
 class TestBusyDropLogging(unittest.TestCase):
