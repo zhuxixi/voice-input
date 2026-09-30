@@ -149,7 +149,9 @@ def acquire_singleton_lock(path: str):
         try:
             os.lseek(fd, 0, os.SEEK_SET)
             data = os.read(fd, 32).decode(errors="replace").strip()
-            if data.isdigit():
+            # isascii guard: str.isdigit() accepts Unicode digits that
+            # int() rejects (e.g. "²"), which would escape the contract
+            if data.isascii() and data.isdigit():
                 holder = int(data)
         except OSError:
             pass

@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest import mock
@@ -287,6 +288,8 @@ class TestSingletonLock(unittest.TestCase):
     def test_singleton_lock_path_contract(self):
         p = voice_hold.singleton_lock_path(1000, "/var/tmp")
         self.assertEqual(p, "/var/tmp/voice-input-hold-1000.lock")
+        self.assertEqual(voice_hold.singleton_lock_path(0, "/x"),
+                         "/x/voice-input-hold-0.lock")
 
     # A2 + A6
     def test_second_acquire_blocked_pid_reported_fd_not_inheritable(self):
@@ -307,19 +310,23 @@ class TestSingletonLock(unittest.TestCase):
         with open(path) as f:  # file carries our pid for the next acquirer
             self.assertEqual(f.read(), str(os.getpid()))
 
-    # Review Focus 3: garbage in the pid slot (crash mid-write) degrades
-    # to holder=None instead of crashing the failed acquirer
+    # Review Focus 3 + review round 1: garbage in the pid slot (crash
+    # mid-write) degrades to holder=None instead of crashing the failed
+    # acquirer. b"\xc2\xb2" decodes to U+00B2 "²": str.isdigit() is true
+    # for it but int() raises ValueError — the isascii guard must catch it.
     def test_garbage_lock_file_content_degrades_to_no_holder(self):
         path = self._path()
         fd, _, _ = voice_hold.acquire_singleton_lock(path)
         self.addCleanup(os.close, fd)
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.truncate(fd, 0)
-        os.write(fd, b"not-a-pid")
-        fd2, holder2, err2 = voice_hold.acquire_singleton_lock(path)
-        self.assertIsNone(fd2)
-        self.assertIsNone(err2)
-        self.assertIsNone(holder2)
+        for garbage in (b"not-a-pid", b"\xc2\xb2"):
+            with self.subTest(garbage=garbage):
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.truncate(fd, 0)
+                os.write(fd, garbage)
+                fd2, holder2, err2 = voice_hold.acquire_singleton_lock(path)
+                self.assertIsNone(fd2)
+                self.assertIsNone(err2)
+                self.assertIsNone(holder2)
 
     # A3
     def test_release_then_reacquire_no_stale_lock(self):
@@ -327,12 +334,13 @@ class TestSingletonLock(unittest.TestCase):
         fd, _, _ = voice_hold.acquire_singleton_lock(path)
         self.assertIsNotNone(fd)
         os.close(fd)  # process-death analogue: kernel releases the flock
-        fd2, holder2, err2 = voice_hold.acquire_singleton_lock(path)
+        fd2, _, err2 = voice_hold.acquire_singleton_lock(path)
         self.assertIsNotNone(fd2)
         self.assertIsNone(err2)
         os.close(fd2)
 
     # A5 / Review Focus 2: un-openable lock file must not raise
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses file permissions")
     def test_open_failure_never_raises(self):
         # occupied-by-another semantics: a file we lack permission to open
         p = os.path.join(self._tmp, "blocked.lock")
@@ -370,7 +378,16 @@ class TestSingletonLock(unittest.TestCase):
             [sys.executable, "-c", code],
             stdout=subprocess.PIPE, text=True, cwd=REPO)
         try:
-            self.assertEqual(proc.stdout.readline().strip(), "ready")
+            # bounded handshake read: a bare readline() on a child that
+            # never prints would wedge the suite until the 30s sleep ends
+            line = []
+            reader = threading.Thread(
+                target=lambda: line.append(proc.stdout.readline()),
+                daemon=True)
+            reader.start()
+            reader.join(5)
+            self.assertFalse(reader.is_alive(), "handshake did not arrive in 5s")
+            self.assertEqual(line[0].strip(), "ready")
             fd, holder, err = voice_hold.acquire_singleton_lock(path)
             self.assertIsNone(fd)
             self.assertIsNone(err)
@@ -378,7 +395,7 @@ class TestSingletonLock(unittest.TestCase):
         finally:
             proc.kill()
             proc.wait(timeout=5)  # the flock dies with the child
-        fd2, holder2, err2 = voice_hold.acquire_singleton_lock(path)
+        fd2, _, err2 = voice_hold.acquire_singleton_lock(path)
         self.assertIsNotNone(fd2)  # A3 semantics across processes
         self.assertIsNone(err2)
         os.close(fd2)
