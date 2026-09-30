@@ -288,6 +288,73 @@ class TestSingletonLock(unittest.TestCase):
         p = voice_hold.singleton_lock_path(1000, "/var/tmp")
         self.assertEqual(p, "/var/tmp/voice-input-hold-1000.lock")
 
+    # A2 + A6
+    def test_second_acquire_blocked_pid_reported_fd_not_inheritable(self):
+        path = self._path()
+        fd, holder, err = voice_hold.acquire_singleton_lock(path)
+        self.assertIsNotNone(fd)
+        self.assertIsNone(holder)
+        self.assertIsNone(err)
+        # M3: children (arecord/transcribe) must never hold the lock — a
+        # hung child keeping the flock past parent death would make every
+        # new instance refuse to start (permanent deafness)
+        self.assertFalse(os.get_inheritable(fd))
+        self.addCleanup(os.close, fd)
+        fd2, holder2, err2 = voice_hold.acquire_singleton_lock(path)
+        self.assertIsNone(fd2)
+        self.assertIsNone(err2)
+        self.assertEqual(holder2, os.getpid())  # we are the holder
+        with open(path) as f:  # file carries our pid for the next acquirer
+            self.assertEqual(f.read(), str(os.getpid()))
+
+    # Review Focus 3: garbage in the pid slot (crash mid-write) degrades
+    # to holder=None instead of crashing the failed acquirer
+    def test_garbage_lock_file_content_degrades_to_no_holder(self):
+        path = self._path()
+        fd, _, _ = voice_hold.acquire_singleton_lock(path)
+        self.addCleanup(os.close, fd)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.truncate(fd, 0)
+        os.write(fd, b"not-a-pid")
+        fd2, holder2, err2 = voice_hold.acquire_singleton_lock(path)
+        self.assertIsNone(fd2)
+        self.assertIsNone(err2)
+        self.assertIsNone(holder2)
+
+    # A3
+    def test_release_then_reacquire_no_stale_lock(self):
+        path = self._path()
+        fd, _, _ = voice_hold.acquire_singleton_lock(path)
+        self.assertIsNotNone(fd)
+        os.close(fd)  # process-death analogue: kernel releases the flock
+        fd2, holder2, err2 = voice_hold.acquire_singleton_lock(path)
+        self.assertIsNotNone(fd2)
+        self.assertIsNone(err2)
+        os.close(fd2)
+
+    # A5 / Review Focus 2: un-openable lock file must not raise
+    def test_open_failure_never_raises(self):
+        # occupied-by-another semantics: a file we lack permission to open
+        p = os.path.join(self._tmp, "blocked.lock")
+        fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o600)
+        os.close(fd)
+        os.chmod(p, 0)
+        self.addCleanup(os.chmod, p, 0o600)
+        res = voice_hold.acquire_singleton_lock(p)
+        self.assertIsNone(res[0])
+        self.assertIsNone(res[1])
+        self.assertTrue(res[2])  # readable errno string, no exception
+        # symlink must be rejected by O_NOFOLLOW (ELOOP)
+        target = os.path.join(self._tmp, "target")
+        with open(target, "w"):
+            pass
+        link = os.path.join(self._tmp, "link.lock")
+        os.symlink(target, link)
+        res2 = voice_hold.acquire_singleton_lock(link)
+        self.assertIsNone(res2[0])
+        self.assertIsNone(res2[1])
+        self.assertTrue(res2[2])
+
 
 if __name__ == "__main__":
     unittest.main()

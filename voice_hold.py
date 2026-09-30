@@ -124,6 +124,49 @@ def singleton_lock_path(uid: int, tmpdir: str) -> str:
     return os.path.join(tmpdir, f"{LOCK_STEM}-{uid}.lock")
 
 
+def acquire_singleton_lock(path: str):
+    """Single-instance gate — the only place flock lives (#28).
+
+    Returns (fd, holder_pid, error); NEVER raises (spec D3/B1):
+      success        -> (fd, None, None) — caller keeps fd open for the
+                        process lifetime (close releases the lock); fd is
+                        non-inheritable (PEP 446) so arecord/transcribe
+                        children never hold the lock (spec M3).
+      already locked -> (None, <pid read from the file, best effort>, None)
+      cannot open    -> (None, None, "<strerror>")  # EACCES/ELOOP/… incl.
+                                                              O_NOFOLLOW
+    The pid inside the file is diagnostic only ("last holder" — may be a
+    dead predecessor); the mutex decision is always the flock itself.
+    """
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        return None, None, (os.strerror(e.errno) if e.errno else str(e))
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        holder = None
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            data = os.read(fd, 32).decode(errors="replace").strip()
+            if data.isdigit():
+                holder = int(data)
+        except OSError:
+            pass
+        os.close(fd)
+        return None, holder, None
+    except OSError as e:
+        os.close(fd)
+        return None, None, (os.strerror(e.errno) if e.errno else str(e))
+    try:  # record our pid for the next failed acquirer (diagnostic only)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.truncate(fd, 0)
+        os.write(fd, str(os.getpid()).encode())
+    except OSError:
+        pass
+    return fd, None, None
+
+
 class _Overlay:
     """Minimal GTK floating indicator (undecorated TOPLEVEL kept above).
 
