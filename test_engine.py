@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -654,6 +655,97 @@ class TestTranscribeOnceEnv(unittest.TestCase):
             "VOICE_INPUT_ENGINE": "cpu", "LD_LIBRARY_PATH": "/opt/keep"})
         self.assertEqual(rc, 0, err)
         self.assertEqual(out, "/opt/keep")
+
+
+class TestTranscribeOnceTerms(unittest.TestCase):
+    """#27 A3: transcribe_once 词表接线与降级(cpu 引擎,假模型,干净子进程)。"""
+
+    REPO = os.path.dirname(os.path.realpath(__file__))
+    VENV_PY = os.path.join(REPO, "venv", "bin", "python3")
+
+    def _run_main(self, terms_path: str):
+        """干净子进程跑 main():patch build_model 为记录型假模型,打印标记行。"""
+        code = (
+            "import io, os, sys, types, contextlib\n"
+            "sys.path.insert(0, %r)\n"
+            "import engine, transcribe_once\n"
+            "calls = {}\n"
+            "class FakeModel:\n"
+            "    def transcribe(self, wav, language='zh', initial_prompt=None, **kw):\n"
+            "        calls['kwargs'] = dict(language=language,"
+            " initial_prompt=initial_prompt, **kw)\n"
+            "        return [types.SimpleNamespace(text=' 你好 ')], None\n"
+            "engine.build_model = lambda *a, **k: FakeModel()\n"
+            "buf = io.StringIO()\n"
+            "with contextlib.redirect_stdout(buf):\n"
+            "    rc = transcribe_once.main(['/nonexistent/t.wav'],"
+            " terms_path=os.environ['TERMS_PATH'])\n"
+            "print('RC', rc)\n"
+            "print('PROMPT', repr(calls['kwargs'].get('initial_prompt')))\n"
+            "print('EXTRA', sorted(k for k in calls['kwargs']"
+            " if k not in ('language', 'initial_prompt')))\n"
+            "print('OUT', buf.getvalue().strip())\n"
+        ) % self.REPO
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("LD_LIBRARY_PATH", "VOICE_INPUT_ENGINE",
+                            "VOICE_INPUT_MODEL")}
+        env.update({"VOICE_INPUT_ENGINE": "cpu", "TERMS_PATH": terms_path})
+        p = subprocess.run([self.VENV_PY, "-c", code],
+                           capture_output=True, text=True, env=env)
+        markers = dict(
+            line.split(" ", 1) for line in p.stdout.strip().splitlines()
+            if line.startswith(("RC ", "PROMPT ", "EXTRA ", "OUT ")))
+        return p, markers
+
+    def test_terms_json_forwarded_as_prompt(self):
+        with tempfile.TemporaryDirectory() as root:
+            tp = os.path.join(root, "terms.json")
+            with open(tp, "w", encoding="utf-8") as f:
+                json.dump({"terms": ["zima", "jfox"],
+                           "hotwords": ["zima", "jfox"]}, f)
+            p, m = self._run_main(tp)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("zima", m["PROMPT"])            # 词表进 initial_prompt
+        self.assertEqual(m["EXTRA"], "['hotwords']")  # hotwords 列表 join 后透传
+        self.assertEqual(m["OUT"], "你好")             # join/strip 走真实代码
+
+    def test_missing_terms_degrades_to_no_prompt(self):
+        p, m = self._run_main(
+            os.path.join(tempfile.gettempdir(), "no-such-terms-27.json"))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(m["PROMPT"], "None")
+        self.assertEqual(m["OUT"], "你好")
+        self.assertIn("[voice-input] terms.json load failed", p.stderr)
+
+    def test_corrupt_terms_degrades_to_no_prompt(self):
+        with tempfile.TemporaryDirectory() as root:
+            tp = os.path.join(root, "terms.json")
+            with open(tp, "w", encoding="utf-8") as f:
+                f.write("{ not json")
+            p, m = self._run_main(tp)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(m["PROMPT"], "None")
+        self.assertEqual(m["OUT"], "你好")
+
+    def test_model_error_actionable_exit_1(self):
+        code = (
+            "import runpy, sys\n"
+            "sys.path.insert(0, %r)\n"
+            "import engine\n"
+            "def boom(*a, **k):\n"
+            "    raise RuntimeError('boom')\n"
+            "engine.build_model = boom\n"
+            "sys.argv = ['transcribe_once.py', '/nonexistent/t.wav']\n"
+            "runpy.run_path(%r, run_name='__main__')\n"
+        ) % (self.REPO, os.path.join(self.REPO, "transcribe_once.py"))
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("LD_LIBRARY_PATH", "VOICE_INPUT_ENGINE",
+                            "VOICE_INPUT_MODEL")}
+        env["VOICE_INPUT_ENGINE"] = "cpu"
+        p = subprocess.run([self.VENV_PY, "-c", code],
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("[voice-input] transcribe failed: boom", p.stderr)
 
 
 class TestWrapperExport(unittest.TestCase):

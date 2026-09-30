@@ -4,6 +4,7 @@
 test-mic.sh / voice-toggle.sh 的转写入口(#16:收敛原先三处内嵌 CUDA 片段,
 引擎选择因此能到达这两个脚本)。引擎与模型经 VOICE_INPUT_ENGINE /
 VOICE_INPUT_MODEL 选择,默认 cuda + large-v3(契约见 engine.py 模块注释)。
+词表热词(#27): main() 组装 terms.initial_prompt/hotwords,所有引擎统一生效,组装失败降级为无提示转写。
 """
 
 import os
@@ -40,6 +41,8 @@ if not _SITE or not os.path.isdir(_SITE):
     sys.exit(1)
 
 import engine  # 顶层纯标准库(#16);preamble 计算收敛到 engine 单点(#19 债①)
+from terms import (DEFAULT_TERMS_PATH, build_prompt, build_transcribe_kwargs,
+                   load_terms)
 
 try:
     _ENG = engine.engine_name(dict(os.environ))
@@ -68,13 +71,25 @@ os.environ["LD_LIBRARY_PATH"] = engine.prepend_library_path(
     dict(os.environ), _LIB_PATHS)
 
 
-def main() -> int:
-    if len(sys.argv) != 2:
+def main(argv=None, terms_path=DEFAULT_TERMS_PATH) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if len(argv) != 1:
         print("usage: transcribe_once.py <wav>", file=sys.stderr)
         return 2
-    wav = sys.argv[1]
+    wav = argv[0]
+    # terms 组装独立 try:热词问题降级到无 prompt,绝不阻断转写(与 voice-ptt.py
+    # 同构;load_terms/build_* 内部已降级,这里是双保险)(#27)
+    try:
+        cfg = load_terms(terms_path)
+        prompt = build_prompt(cfg.get("terms", []))
+        extra_kw = build_transcribe_kwargs(cfg)
+    except Exception as te:
+        prompt, extra_kw = None, {}
+        print(f"[voice-input] terms assemble failed, degrade to no-prompt: {te}",
+              file=sys.stderr)
     model = engine.build_model()
-    segments, info = model.transcribe(wav, language="zh")
+    segments, info = model.transcribe(wav, language="zh",
+                                      initial_prompt=prompt, **extra_kw)
     # join/strip 与 voice-ptt.py 转写路径同构
     text = "".join(s.text for s in segments).strip()
     print(text)
