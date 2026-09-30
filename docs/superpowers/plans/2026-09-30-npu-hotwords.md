@@ -589,4 +589,48 @@ Expected: 空输出（零改动）
 
 ## Verification log
 
-（Task 5 执行时填写）
+执行日期：2026-09-30；分支 `issue-27-npu-hotwords`，验证基线 HEAD = `f3001c0`（main = `32b2090`），工作区干净。
+
+### A4-1 全量回归（Step 1）
+
+```
+$ ./venv/bin/python3 -m unittest test_engine test_terms test_archive test_media_pause test_hold test_paste test_bench -v
+----------------------------------------------------------------------
+Ran 165 tests in 0.860s
+
+OK
+```
+
+结果：**165 tests, 0 failures, 0 errors**。逐模块计数：
+
+| 模块 | 测试数 |
+| --- | --- |
+| test_engine | 70 |
+| test_terms | 20 |
+| test_archive | 8 |
+| test_media_pause | 4 |
+| test_hold | 16 |
+| test_paste | 31 |
+| test_bench | 16 |
+| 合计 | 165 |
+
+### A4-2 保护清单核对（Step 2）
+
+改动面（`git diff main --name-only`）恰好 8 个路径 = 6 个产品文件 + 2 个流程文档：
+
+```
+README.md
+README.zh-CN.md
+contrib/voice-hold.service
+docs/superpowers/plans/2026-09-30-npu-hotwords.md
+docs/superpowers/specs/2026-09-30-npu-hotwords-design.md
+engine.py
+test_engine.py
+transcribe_once.py
+```
+
+零改动清单（`git diff main --stat -- voice_hold.py paste.py voice-ptt.py terms.py archive.py media_pause.py voice-ptt.sh voice-toggle.sh test-mic.sh bench download-model.py download-model.sh test_terms.py test_archive.py test_media_pause.py test_hold.py test_paste.py test_bench.py`）输出为空（0 字节）。17 个受保护路径全部未被触碰。
+
+### 结论
+
+A4 门通过：全量套件绿，保护清单零改动，改动面与 spec Scope 一致。
