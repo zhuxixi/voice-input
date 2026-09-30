@@ -152,7 +152,7 @@ systemctl --user enable --now voice-hold.service
 
   然后 `systemctl --user daemon-reload && systemctl --user restart ydotool`。
 - 转写受 `VOICE_INPUT_TRANSCRIBE_TIMEOUT`（默认 120 秒）约束：挂死的子进程会被
-  杀掉，热键继续可用而不是永久冻结。
+  杀掉，热键继续可用而不是永久冻结。NPU 清缓存后首次运行建议 ≥240s（冷编译）。
 
 ## 配置
 
@@ -168,9 +168,11 @@ systemctl --user enable --now voice-hold.service
 
 ### NPU 引擎（Intel AI Boost，如 Lunar Lake）
 
-`VOICE_INPUT_ENGINE=npu` 经 openvino-genai 的 `WhisperPipeline`（静态管线）在 Intel
-NPU 上转写。OmniBook（Core Ultra 258V，whisper-small int8）实测：**8 秒语音约 0.3s，
-对比 CPU 约 3.4s——快约 12 倍**（基准见 #17）。
+`VOICE_INPUT_ENGINE=npu` 经 openvino-genai 的 `WhisperPipeline` 在 Intel NPU 上
+转写——stateful 管线 + 构造期 `word_timestamps=True`，正是它让 `initial_prompt`/
+热词在 NPU 上可用（#27）。OmniBook（Core Ultra 258V，whisper-small int8）实测：
+**带词表约 1.0s / 8 秒语音**（旧静态管线约 0.3s 但带不了热词），另加每次约 1.4s
+模型加载。（`bench/npu-bench.py` 基准脚本仍测旧静态管线，数字与本引擎路径不同。）
 
 三个前置（缺一不可）：NPU 驱动 ≥ 1.38.0；venv 装 `openvino` + `openvino-genai`；
 进程启动时 `LD_LIBRARY_PATH` 含 `/usr/lib/x86_64-linux-gnu`（三个 wrapper 与
@@ -180,11 +182,14 @@ voice_hold 会自动注入；手工跑 CLI 需自己 export）。
 `huggingface-cli download OpenVINO/whisper-small-int8-ov`；`engine=npu` 时
 `VOICE_INPUT_MODEL` 默认 `small-int8-ov`。
 
-注意：首次转写一次性静态编译约 47s（默认 120s 超时兜得住）；编译缓存
-`~/.cache/voice-input/npu-compile-cache`（约 850MB，可删，代价是一次 47s 重编译）
-让后续加载降到约 0.8s。热词（terms.json）在 NPU 静态管线上不支持：引擎告警后
-忽略热词继续转写，绝不阻断；Wayland 按住说话链路现状本就不接热词（不变）。
-每次听写仍有约 0.8s 加载（#18 的子进程架构），常驻转写 worker 见 #25。
+注意：首次转写一次性冷编译约 **155s**（首次运行把 `VOICE_INPUT_TRANSCRIBE_TIMEOUT`
+设 ≥240——仓库示例服务已设 240）；编译缓存 `~/.cache/voice-input/npu-compile-cache`
+（约 2.4GB，含历史条目；可整目录删，代价一次 155s 重编译）让后续加载降到约 1.4s。
+可先跑一次 `VOICE_INPUT_ENGINE=npu ./test-mic.sh` 预热，或接受第一次听写较慢。
+热词（terms.json）自 #27 起 **NPU 支持**（stateful 管线 + 构造期 word_timestamps）；
+热词是概率性软引导而非保证，偶尔也会改动附近的常用词（实测例：语音 → 语言）。Wayland 按住说话链路经
+transcribe_once.py 自动吃到词表。每次听写仍有约 1.4s 加载（#18 子进程架构），
+常驻转写 worker 见 #25。
 
 ### 自定义词汇（热词）
 
@@ -200,6 +205,7 @@ voice_hold 会自动注入；手工跑 CLI 需自己 export）。
 - **`terms`**：词表列表，拼入 Whisper `initial_prompt`（取前 30 条），引导识别你的专有名词（项目名、术语等）
 - **`hotwords`**：`null`、列表或空格分隔字符串，透传给 faster-whisper 的 `hotwords` 参数
 - **健壮性**：文件缺失、格式损坏或非 UTF-8 都不会中断转写——自动降级为无热词转写并打印告警
+- **全引擎生效**：cuda/cpu（faster-whisper）与 npu（stateful 管线，#27）均支持
 
 ## 工作原理
 
