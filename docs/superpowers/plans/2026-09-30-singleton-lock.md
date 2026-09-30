@@ -20,7 +20,7 @@
 - Lock path: `<tmpdir>/voice-input-hold-<uid>.lock`, opened `O_RDWR|O_CREAT|O_NOFOLLOW`, 0600. — spec D1/D2
 - `$TMPDIR` is honored only when non-empty AND absolute; otherwise `tempfile.gettempdir()`. — spec D9
 - Test style: `unittest` + `mock` in `test_hold.py`; every new class isolates fs under a per-test tmpdir; never touch GTK/D-Bus/arecord/evdev from tests. — spec §5
-- Full suite (README L363): `python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold -v` must pass after every task.
+- Full suite (README:373): `python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold -v` must pass after every task.
 - All work in this worktree; commit per task, conventional commits, English messages; `git add <file>` per file (never `git add -A`).
 
 ## Review Focus
@@ -784,8 +784,16 @@ Then in `stop_recording` only, replace every `WAVFILE` reference with `wav` (fou
 Replace `WAVFILE="/tmp/voice-input-recording.wav"` with:
 
 ```bash
-# Per-recording unique path (#28 D7): no shared fixed name with voice-ptt.py
+# Per-recording unique path (#28 D7): no shared fixed name with voice-ptt.py.
+# Execution ruling (2026-09-30): this script is hotkey-bound — each press is a
+# SEPARATE process, so a per-process mktemp made press 2 wait forever on its
+# own empty file. The path travels in the sidecar "$PIDFILE.wav" instead:
+# start branch mktemps the wav and writes its path to the sidecar; stop branch
+# reads it (missing/empty sidecar or absent wav → one-line stderr + exit 1,
+# never hangs); end of stop removes wav AND sidecar. Sidecar lifecycle mirrors
+# the PIDFILE's.
 WAVFILE="$(mktemp --suffix=.wav "${TMPDIR:-/tmp}/voice-input-recording-XXXXXX")"
+printf '%s\n' "$WAVFILE" > "$PIDFILE.wav"
 ```
 
 - [ ] **Step 5: Static checks (A11 half)**

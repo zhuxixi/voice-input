@@ -86,7 +86,7 @@ def new_recording_path(tmpdir: str) -> str:
 | `HoldDaemon._deliver()` | 读局部 `wav = self.wav_path`（`None` → 记录并 return，防御性）；尺寸检查、`transcribe_once.py <wav>`、`finally` 清理全部改用 `wav` |
 | 模块常量与注释 | `WAVFILE` 删除（仅 `voice_hold.py` 自用，测试与文档无引用，已核）；**`_paste_and_report` docstring（L316-318）同步改**——它提到 "a real WAVFILE at a fixed /tmp path"（m2） |
 | `voice-ptt.py` | `WAVFILE` 常量 → 每次录音 `tempfile.mkstemp` 路径（模块全局变量在 start 时重新赋值；stop 侧先快照局部再 sleep 0.3，防快速重录换路径）；无单测覆盖，靠 A11 的 `py_compile` + 改动保持纯机械 |
-| `voice-toggle.sh` | `WAVFILE=$(mktemp ...)`；`rm -f` 已有，保持 |
+| `voice-toggle.sh` | 每次录音 `mktemp` 唯一路径，路径经 sidecar `"$PIDFILE.wav"` 跨按键传递。**执行期裁决（2026-09-30）**：该脚本是热键逐按键进程（两次按键=两个进程），plan 原案的「每进程 mktemp」会让第二次按键死等自己新建的空文件——改为 start 分支 mktemp 后写 sidecar、stop 分支读 sidecar（缺失/指向不存在的 wav → 一行报错 + 非零退出，不挂死），结束时 wav + sidecar 一并 `rm -f`，sidecar 生命周期镜像 PIDFILE |
 | `contrib/voice-hold.service` | 加 `RestartPreventExitStatus=4`（D3）+ 注释说明与锁的配合；A11 有 static 钉子防将来被误清 |
 
 ### 4.3 数据流（修复后）
@@ -131,8 +131,8 @@ def new_recording_path(tmpdir: str) -> str:
 | A8 | `_deliver` 用实例路径并清理 | 自动化（unit） | 同上（mock `check_output` + `_spawn_paste`） | 传给 `transcribe_once.py` 的 argv[2] == `self.wav_path`；结束后该文件已被 unlink |
 | A9 | 第二实例退出码与不监听 | 自动化（unit） | `python3 -m unittest test_hold.TestDuplicateInstance -v`（mock 抢锁失败，被占/打不开两种形态） | `run()` 返回 4；`pick_device`/`read_loop` 未被调用；两种文案各恰好一行 |
 | A10 | 录音日志含路径 | 自动化（unit） | 同上（mock `Popen` + `redirect_stdout`） | 输出含 `recording -> ` 与本次路径 |
-| A11 | static：固定路径归零 + 语法 + unit 钉子（M2） | 自动化（static/build） | `bash -n voice-toggle.sh`；`python3 -m py_compile voice-ptt.py`；`rg -n "voice-input-recording.wav" --glob '!docs/**' --glob '!venv/**'`；`grep -q 'RestartPreventExitStatus=4' contrib/voice-hold.service` | 四项全过：语法零错、固定录音路径全仓归零（历史 docs 除外）、unit 钉子在位 |
-| A12 | 全仓回归 | 自动化（unit） | README L363 钉定套件：`python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold -v` | 全部通过（含 `TestModulePurity`） |
+| A11 | static：固定路径归零 + 语法 + unit 钉子（M2） | 自动化（static/build） | `bash -n voice-toggle.sh`；`python3 -m py_compile voice-ptt.py`；`rg -n "voice-input-recording.wav" --glob '!docs/**' --glob '!venv/**'` 与 `rg -n '"/tmp/voice-input-hold.wav"' --glob '!docs/**' --glob '!venv/**'`（两个旧固定名都归零）；`grep -q 'RestartPreventExitStatus=4' contrib/voice-hold.service` | 四项全过：语法零错、**两个**固定录音路径全仓归零（历史 docs 除外）、unit 钉子在位 |
+| A12 | 全仓回归 | 自动化（unit） | README:373 钉定套件：`python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold -v` | 全部通过（含 `TestModulePurity`） |
 | U1 | 服务在跑时手工起第二实例 | 用户实测 | 手工执行 `python3 voice_hold.py`，观察 stderr 与 `echo $?` | 打印 `another instance already running (last holder pid <服务pid>)`；退出码 4；**听写功能不受影响**（随即按住右 Alt 说一句仍正常上屏） |
 | U2 | systemd 不再重启循环 | 用户实测 | ① 改本机 `~/.config/systemd/user/voice-hold.service` 加 `RestartPreventExitStatus=4` + `systemctl --user daemon-reload`；② 手工实例占锁；③ `systemctl --user restart voice-hold`；④ `journalctl --user -u voice-hold -f` 观察 ≥10s | 只有一条拒绝日志，**无 3s 周期重启**；`systemctl --user status` 显示 failed 而非 activating 循环；停掉手工实例后 `systemctl --user restart voice-hold` 能恢复 |
 | U3 | 真机端到端仍正常 | 用户实测 | 按住右 Alt 说一句正常内容；`journalctl --user -u voice-hold -n 5` 看 `recording ->` 行 | 文字**只上屏一次**；日志里的录音路径带随机后缀；该 wav 在上屏后被删除 |
@@ -158,6 +158,11 @@ def new_recording_path(tmpdir: str) -> str:
 
 ## 9. 评审记录
 
+- **2026-09-30 执行期裁决（SDD ledger，代码即裁决结果）**：
+  - D6 优于 plan §4.2：被占分支报错文案补上锁路径（`— lock <path>`），holder 缺失时渲染 `unknown`；
+  - voice-toggle.sh 改 sidecar 方案（见 §4.2 行内裁决注）；
+  - voice-ptt.py `<1KB` 早退补 unlink（镜像 `voice_hold.py` 同款修复）；
+  - A11 grep 扩为两个旧固定名（`voice-input-recording.wav` + `/tmp/voice-input-hold.wav`）。
 - **2026-09-30 design-gate 前自评（v1→v2）**：
   - **B1**（blocking）：v1 只定义「被占」路径，`/tmp` 被他人预占 0600 文件（实测 EACCES）或 symlink（实测 ELOOP）时行为未定义——OSError 炸 traceback 会让退出码 ≠ 4、`RestartPreventExitStatus` 不命中，**复刻本 issue 要消灭的重启循环**。修正：`acquire_singleton_lock` 永不抛 + `O_NOFOLLOW` + 统一 exit 4（D1/D3/4.1，A5）。
   - **B2**（blocking）：A4 跨进程测试父进程可能赶在子进程拿锁前抢空锁 → 必然 flaky（#95 式）。修正：ready 行握手 + kill/wait + 5s 超时（§5、A4）。
