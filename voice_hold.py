@@ -343,7 +343,12 @@ class HoldDaemon:
         注意本函数不触碰 GTK(工作线程非 GTK 主线程)。"""
         try:
             time.sleep(0.3)  # let arecord finish flushing the wav (mirrors voice-ptt)
-            if not os.path.exists(WAVFILE) or os.path.getsize(WAVFILE) < 1000:
+            wav = self.wav_path  # snapshot: busy-drop keeps this stable, but
+            if not wav:          # never trust a None path in a worker thread
+                print("[voice-hold] no recording path (internal error)",
+                      file=sys.stderr)
+                return
+            if not os.path.exists(wav) or os.path.getsize(wav) < 1000:
                 print("[voice-hold] recording empty/too short (<1KB)",
                       file=sys.stderr)
                 return
@@ -355,7 +360,7 @@ class HoldDaemon:
             try:
                 text = subprocess.check_output(
                     [VENV_PY, os.path.join(REPO_DIR, "transcribe_once.py"),
-                     WAVFILE],
+                     wav],
                     # npu 时注入 NPU 库目录(ld.so 只在子进程启动读一次);
                     # 其他引擎原样拷贝,维持现状(#19)
                     env=engine.child_env(self.env),
@@ -370,8 +375,8 @@ class HoldDaemon:
                 print(f"[voice-hold] transcribe failed: {e}", file=sys.stderr)
                 text = ""
             finally:
-                if os.path.exists(WAVFILE):
-                    os.unlink(WAVFILE)
+                if os.path.exists(wav):
+                    os.unlink(wav)
             if not text:
                 print("[voice-hold] no speech recognized", flush=True)
                 return

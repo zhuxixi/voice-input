@@ -452,6 +452,35 @@ class TestRecordingPath(unittest.TestCase):
                 d.start_recording()
         self.assertFalse(os.path.exists(d.wav_path))
 
+    # A8
+    def test_deliver_transcribes_instance_path_and_cleans_up(self):
+        d = self._daemon()
+        wav = voice_hold.new_recording_path(self._tmp)
+        with open(wav, "wb") as f:
+            f.write(b"\0" * 2048)   # pass the <1KB guard without arecord
+        d.wav_path = wav
+        d._spawn_paste = mock.Mock(return_value=(0, False))  # #29 seam
+        with mock.patch.object(voice_hold.subprocess, "check_output",
+                               return_value="你好\n") as co:
+            d._deliver()
+        argv = co.call_args.args[0]
+        self.assertTrue(argv[1].endswith("transcribe_once.py"))
+        self.assertEqual(argv[2], wav)              # A8: argv carries it
+        self.assertFalse(os.path.exists(wav))       # A8: cleaned up
+        d._spawn_paste.assert_called_once_with("你好")
+        self.assertFalse(d.busy)                    # always un-busied
+
+    # Review Focus 6: worker survives a missing wav_path (snapshot guard)
+    def test_deliver_without_path_reports_and_returns(self):
+        d = self._daemon()
+        d.wav_path = None
+        with mock.patch.object(voice_hold.subprocess, "check_output") as co:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                d._deliver()
+        co.assert_not_called()
+        self.assertIn("no recording path", err.getvalue())
+        self.assertFalse(d.busy)
+
 
 if __name__ == "__main__":
     unittest.main()
