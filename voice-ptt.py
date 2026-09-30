@@ -134,9 +134,18 @@ def start_recording():
         ).decode().strip()
     except Exception:
         active_window = None
-    fd, WAVFILE = tempfile.mkstemp(prefix="voice-input-recording-",
-                                    suffix=".wav")
-    os.close(fd)
+    try:
+        fd, WAVFILE = tempfile.mkstemp(prefix="voice-input-recording-",
+                                        suffix=".wav")
+        os.close(fd)
+    except OSError as e:
+        # mkstemp 失败(ENOSPC/EACCES/EMFILE)不得逸出到 pynput 回调:pynput 的
+        # listener 线程对回调异常会 stop()+re-raise,热键死到手工重启(voice-ptt
+        # 无 systemd unit)。回滚状态并返回,让下一次按键可重试(CR r2)。
+        recording = False
+        print(f"[voice-input] cannot create recording file: {e}",
+              file=sys.stderr)
+        return
     if PAUSE_MEDIA_ENABLED:
         try:
             paused = pause_playing()  # D-Bus 在锁外执行,不阻塞其它线程
