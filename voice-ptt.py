@@ -207,6 +207,13 @@ def stop_recording():
     time.sleep(0.3)
 
     if not os.path.exists(wav) or os.path.getsize(wav) < 1000:
+        # unique per-recording slots never self-clean like the old fixed
+        # WAVFILE did (start_recording no longer unlinks); drop the short/
+        # empty tap here (#28) — mirrors voice_hold.py
+        try:
+            os.unlink(wav)
+        except OSError:
+            pass
         print("[voice-input] recording empty/too short (<1KB); arecord may have failed (EBUSY/device busy?)", file=sys.stderr)
         return
 
