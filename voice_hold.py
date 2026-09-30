@@ -272,6 +272,7 @@ class HoldDaemon:
         self.busy = False
         self.rec_proc = None
         self.wav_path = None    # per-recording path, set by start_recording (#28)
+        self._lock_fd = None   # singleton flock held for process lifetime (#28)
         self.overlay = _Overlay()
         self._paused = []
         self._media_pause = None
@@ -456,6 +457,22 @@ class HoldDaemon:
         return missing
 
     def run(self) -> int:
+        lock_path = singleton_lock_path(os.getuid(),
+                                        runtime_tmpdir(self.env))
+        fd, holder, err = acquire_singleton_lock(lock_path)
+        if fd is None:
+            # D3/B1 (#28): busy AND un-openable both exit 4 — any other
+            # exit path would restart-loop under Restart=always until the
+            # start limit trips. Exit 4 is pinned by RestartPreventExitStatus.
+            if err is None:
+                detail = ("another instance already running "
+                          f"(last holder pid {holder})")
+            else:
+                detail = f"cannot open lock file {lock_path}: {err}"
+            print(f"[voice-hold] {detail} — refusing to start",
+                  file=sys.stderr)
+            return EXIT_DUPLICATE_INSTANCE
+        self._lock_fd = fd  # close = release; process exit releases anyway
         missing = self._preflight()
         if missing:
             for m in missing:

@@ -482,5 +482,63 @@ class TestRecordingPath(unittest.TestCase):
         self.assertFalse(d.busy)
 
 
+class TestDuplicateInstance(unittest.TestCase):
+    """A9 (#28): a failed lock acquisition exits 4 before any listening."""
+
+    def _daemon(self):
+        return voice_hold.HoldDaemon(env={})
+
+    def test_busy_lock_exits_4_without_listening(self):
+        d = self._daemon()
+        with mock.patch.object(
+                voice_hold, "acquire_singleton_lock",
+                return_value=(None, 4242, None)), \
+             mock.patch.object(
+                 voice_hold.HoldDaemon, "_preflight",
+                 return_value=[]) as pre, \
+             mock.patch.object(voice_hold, "pick_device") as pick:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                rc = d.run()
+        self.assertEqual(rc, 4)
+        self.assertEqual(rc, voice_hold.EXIT_DUPLICATE_INSTANCE)
+        pre.assert_not_called()   # D5: lock gate comes before preflight
+        pick.assert_not_called()
+        out = err.getvalue()
+        self.assertIn("another instance already running", out)
+        self.assertIn("last holder pid 4242", out)
+        self.assertEqual(len(out.strip().splitlines()), 1)
+
+    # Review Focus 2: un-openable lock maps to exit 4 too (never a
+    # traceback exit code that would defeat RestartPreventExitStatus)
+    def test_open_error_exits_4_with_errno_message(self):
+        d = self._daemon()
+        with mock.patch.object(
+                voice_hold, "acquire_singleton_lock",
+                return_value=(None, None, "Permission denied")), \
+             mock.patch.object(voice_hold, "pick_device") as pick:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                rc = d.run()
+        self.assertEqual(rc, 4)
+        pick.assert_not_called()
+        out = err.getvalue()
+        self.assertIn("cannot open lock file", out)
+        self.assertIn("Permission denied", out)
+
+    def test_success_keeps_lock_fd_for_process_lifetime(self):
+        d = self._daemon()
+        fd = os.open(os.devnull, os.O_RDONLY)  # stand-in for a real lock fd
+        self.addCleanup(os.close, fd)
+        with mock.patch.object(
+                voice_hold, "acquire_singleton_lock",
+                return_value=(fd, None, None)), \
+             mock.patch.object(
+                 voice_hold.HoldDaemon, "_preflight",
+                 return_value=["fake missing item"]):
+            with contextlib.redirect_stderr(io.StringIO()):
+                rc = d.run()   # preflight failure -> 3 (existing semantics)
+        self.assertEqual(rc, 3)
+        self.assertEqual(d._lock_fd, fd)   # held, not closed
+
+
 if __name__ == "__main__":
     unittest.main()
