@@ -1,8 +1,11 @@
+import contextlib
+import io
 import os
 import subprocess
 import sys
 import types
 import unittest
+from unittest import mock
 
 import voice_hold
 
@@ -144,6 +147,68 @@ class TestModulePurity(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         self.assertIn("100 (True, False, 'start')", proc.stdout.decode())
+
+
+class TestPasteSpawnContract(unittest.TestCase):
+    """#29 A1/A4/A5: paste subprocess contract — no stdio pipes (root cause
+    of the 30s false timeout: wl-copy's daemonized clipboard server inherits
+    the pipe and EOF never arrives), pinned timeout/argv/input, and the
+    result branches of _paste_and_report."""
+
+    def _daemon(self):
+        return voice_hold.HoldDaemon(env={})
+
+    def test_no_pipe_timeout_argv_input(self):
+        d = self._daemon()
+        completed = types.SimpleNamespace(returncode=0)
+        with mock.patch.object(voice_hold.subprocess, "run",
+                               return_value=completed) as m:
+            d._spawn_paste("测试文本")
+        kwargs = m.call_args.kwargs
+        self.assertNotIn("stdout", kwargs)   # the #29 root cause — never again
+        self.assertNotIn("stderr", kwargs)
+        self.assertEqual(kwargs.get("timeout"), voice_hold.PASTE_TIMEOUT)
+        self.assertEqual(kwargs["input"], "测试文本".encode())
+        argv = m.call_args.args[0]
+        self.assertEqual(argv[0], sys.executable)
+        self.assertTrue(argv[1].endswith("paste.py"))
+
+    def test_timeout_expired_swallowed(self):
+        d = self._daemon()
+        def raise_timeout(*a, **k):
+            raise voice_hold.subprocess.TimeoutExpired("paste.py", 10)
+        with mock.patch.object(voice_hold.subprocess, "run",
+                               side_effect=raise_timeout):
+            self.assertEqual(d._spawn_paste("x"), (None, True))
+
+    def test_timeout_bound_and_message(self):
+        self.assertLessEqual(voice_hold.PASTE_TIMEOUT, 10)
+        d = self._daemon()
+        d._spawn_paste = lambda text: (None, True)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d._paste_and_report("x")
+        out = err.getvalue()
+        self.assertIn("timed out after", out)
+        self.assertNotIn("ydotoold responsive", out)
+
+    def test_result_branches(self):
+        d = self._daemon()
+        for rc, expect in ((3, "exit 3"), (0, "delivered:")):
+            with self.subTest(rc=rc):
+                d._spawn_paste = lambda text, rc=rc: (rc, False)
+                err = io.StringIO()
+                # capture both streams: the success branch prints to stdout
+                # (flush=True, unchanged pre-#29), the fail/timeout branches
+                # to stderr (spec D3/D4)
+                with contextlib.redirect_stderr(err), \
+                        contextlib.redirect_stdout(err):
+                    d._paste_and_report("hi")
+                out = err.getvalue()
+                self.assertIn(expect, out)
+                if rc != 0:
+                    self.assertNotIn("delivered:", out)
+                    self.assertEqual(len(out.strip().splitlines()), 1)
 
 
 if __name__ == "__main__":
