@@ -169,6 +169,15 @@ def acquire_singleton_lock(path: str):
     return fd, None, None
 
 
+def new_recording_path(tmpdir: str) -> str:
+    """Fresh unique recording slot (#28 D4): mkstemp gives O_EXCL creation
+    (no TOCTOU with another instance); arecord opens/truncates the path."""
+    fd, path = tempfile.mkstemp(
+        prefix=RECORDING_PREFIX, suffix=RECORDING_SUFFIX, dir=tmpdir)
+    os.close(fd)
+    return path
+
+
 class _Overlay:
     """Minimal GTK floating indicator (undecorated TOPLEVEL kept above).
 
@@ -262,6 +271,7 @@ class HoldDaemon:
         self.recording = False
         self.busy = False
         self.rec_proc = None
+        self.wav_path = None    # per-recording path, set by start_recording (#28)
         self.overlay = _Overlay()
         self._paused = []
         self._media_pause = None
@@ -273,19 +283,27 @@ class HoldDaemon:
             print(f"[voice-hold] media_pause unavailable: {e}", file=sys.stderr)
 
     def start_recording(self):
-        if os.path.exists(WAVFILE):
-            os.unlink(WAVFILE)
+        self.wav_path = new_recording_path(runtime_tmpdir(self.env))
         if self._media_pause and self._media_pause.PAUSE_MEDIA_ENABLED:
             try:
                 self._paused = self._media_pause.pause_playing()
             except Exception as e:
                 print(f"[voice-hold] pause_media failed: {e}", file=sys.stderr)
-        self.rec_proc = subprocess.Popen(
-            ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1",
-             "-D", "default", WAVFILE],
-            stdout=subprocess.DEVNULL, stderr=sys.stderr)
+        try:
+            self.rec_proc = subprocess.Popen(
+                ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1",
+                 "-D", "default", self.wav_path],
+                stdout=subprocess.DEVNULL, stderr=sys.stderr)
+        except Exception:
+            # M1 (#28): leave no empty slot behind; daemon crash/restart
+            # semantics unchanged (the exception still propagates)
+            try:
+                os.unlink(self.wav_path)
+            except OSError:
+                pass
+            raise
         self.overlay.show("● REC", "#ff5555")
-        print("[voice-hold] recording...", flush=True)
+        print(f"[voice-hold] recording -> {self.wav_path}", flush=True)
 
     def stop_recording(self):
         """同步快停(毫秒~2.5s 级):杀录音、恢复媒体、藏浮层;转写+上屏交给

@@ -401,5 +401,57 @@ class TestSingletonLock(unittest.TestCase):
         os.close(fd2)
 
 
+class TestRecordingPath(unittest.TestCase):
+    """A7/A8/A10 (#28): per-recording unique wav path through
+    start_recording/_deliver, with arecord/paste/transcribe mocked."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="vh-wav-test-")
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+
+    def _daemon(self):
+        d = voice_hold.HoldDaemon(env={"TMPDIR": self._tmp,
+                                       "VOICE_INPUT_ENGINE": "cpu"})
+        d.overlay = mock.Mock()   # never touch GTK from tests
+        d._media_pause = None     # never touch D-Bus from tests
+        return d
+
+    # A7
+    def test_new_recording_path_unique_in_dir(self):
+        p1 = voice_hold.new_recording_path(self._tmp)
+        p2 = voice_hold.new_recording_path(self._tmp)
+        self.assertNotEqual(p1, p2)
+        for p in (p1, p2):
+            self.assertEqual(os.path.dirname(p), self._tmp)
+            self.assertTrue(os.path.exists(p))  # slot created
+            self.assertEqual(os.path.getsize(p), 0)
+
+    # A7 + A10
+    def test_start_recording_uses_fresh_path_and_logs_it(self):
+        d = self._daemon()
+        with mock.patch.object(voice_hold.subprocess, "Popen") as popen, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            d.start_recording()
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[0], "arecord")
+        self.assertEqual(argv[-1], d.wav_path)          # A7: unique path
+        self.assertTrue(os.path.exists(d.wav_path))     # slot exists
+        self.assertIn("recording -> ", out.getvalue())  # A10: log carries it
+        self.assertIn(d.wav_path, out.getvalue())
+
+    # A7/M1/Review Focus 5: arecord spawn failure leaves no empty slot
+    def test_start_recording_popen_failure_leaves_no_file(self):
+        d = self._daemon()
+
+        def boom(*a, **k):
+            raise OSError("arecord missing")
+
+        with mock.patch.object(voice_hold.subprocess, "Popen",
+                               side_effect=boom):
+            with self.assertRaises(OSError):
+                d.start_recording()
+        self.assertFalse(os.path.exists(d.wav_path))
+
+
 if __name__ == "__main__":
     unittest.main()
