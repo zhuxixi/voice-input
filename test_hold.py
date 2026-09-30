@@ -523,6 +523,7 @@ class TestDuplicateInstance(unittest.TestCase):
         out = err.getvalue()
         self.assertIn("cannot open lock file", out)
         self.assertIn("Permission denied", out)
+        self.assertEqual(len(out.strip().splitlines()), 1)
 
     def test_success_keeps_lock_fd_for_process_lifetime(self):
         d = self._daemon()

@@ -270,8 +270,8 @@ class HoldDaemon:
         self.recording = False
         self.busy = False
         self.rec_proc = None
-        self.wav_path = None    # per-recording path, set by start_recording (#28)
-        self._lock_fd = None   # singleton flock held for process lifetime (#28)
+        self.wav_path = None  # per-recording path, set by start_recording (#28)
+        self._lock_fd = None  # singleton flock held for process lifetime (#28)
         self.overlay = _Overlay()
         self._paused = []
         self._media_pause = None
@@ -349,6 +349,12 @@ class HoldDaemon:
                       file=sys.stderr)
                 return
             if not os.path.exists(wav) or os.path.getsize(wav) < 1000:
+                # unique per-recording slots never self-clean like the old
+                # fixed WAVFILE did — drop the short/empty tap here (#28)
+                try:
+                    os.unlink(wav)
+                except OSError:
+                    pass
                 print("[voice-hold] recording empty/too short (<1KB)",
                       file=sys.stderr)
                 return
@@ -464,8 +470,9 @@ class HoldDaemon:
             # exit path would restart-loop under Restart=always until the
             # start limit trips. Exit 4 is pinned by RestartPreventExitStatus.
             if err is None:
-                detail = ("another instance already running "
-                          f"(last holder pid {holder})")
+                holder_disp = holder if holder is not None else "unknown"
+                detail = ("another instance already running (last holder pid "
+                          f"{holder_disp}) — lock {lock_path}")
             else:
                 detail = f"cannot open lock file {lock_path}: {err}"
             print(f"[voice-hold] {detail} — refusing to start",
