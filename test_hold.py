@@ -1,8 +1,10 @@
 import contextlib
 import io
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -255,6 +257,36 @@ class TestBusyDropLogging(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             d.handle_key_value(1)
         self.assertEqual(err.getvalue(), "")
+
+
+class TestSingletonLock(unittest.TestCase):
+    """A1-A6 (#28): lock path derivation + flock semantics. All fs work is
+    isolated under a per-test tmpdir; nothing here touches arecord/evdev."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="vh-lock-test-")
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+
+    def _path(self):
+        return voice_hold.singleton_lock_path(os.getuid(), self._tmp)
+
+    # A1
+    def test_runtime_tmpdir_env_variants(self):
+        self.assertEqual(voice_hold.runtime_tmpdir({"TMPDIR": "/var/tmp"}),
+                         "/var/tmp")
+        self.assertEqual(voice_hold.runtime_tmpdir({}),
+                         tempfile.gettempdir())
+        self.assertEqual(voice_hold.runtime_tmpdir({"TMPDIR": ""}),
+                         tempfile.gettempdir())
+        # D9: relative TMPDIR must be refused — a relative lock path would
+        # mean one lock per cwd and the mutex would silently vanish
+        self.assertEqual(voice_hold.runtime_tmpdir({"TMPDIR": "rel/dir"}),
+                         tempfile.gettempdir())
+
+    # A1
+    def test_singleton_lock_path_contract(self):
+        p = voice_hold.singleton_lock_path(1000, "/var/tmp")
+        self.assertEqual(p, "/var/tmp/voice-input-hold-1000.lock")
 
 
 if __name__ == "__main__":

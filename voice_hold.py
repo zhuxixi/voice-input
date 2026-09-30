@@ -17,9 +17,11 @@ Device permission: reading /dev/input/event* requires the `input` group
 root:input by default). Needs a re-login after `usermod -aG input $USER`.
 """
 
+import fcntl
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -29,6 +31,11 @@ REPO_DIR = os.path.dirname(os.path.realpath(__file__))
 VENV_PY = os.path.join(REPO_DIR, "venv", "bin", "python3")
 WAVFILE = "/tmp/voice-input-hold.wav"
 ENV_DEVICE = "VOICE_INPUT_DEVICE"
+
+LOCK_STEM = "voice-input-hold"          # lock filename stem (#28)
+EXIT_DUPLICATE_INSTANCE = 4             # D3: refused start, never restart-loop
+RECORDING_PREFIX = "voice-input-hold-"  # per-recording wav prefix (#28)
+RECORDING_SUFFIX = ".wav"
 
 # KEY_RIGHTALT 单源在 paste.py(evdev KEY_RIGHTALT, linux/input-event-codes.h
 # 稳定 ABI);paste 顶层纯 stdlib,顶层 import 不破纯净性契约
@@ -99,6 +106,22 @@ def pick_device(evdev, wanted: str = None):
         if is_keyboard_device(dev.name, key_codes):
             return dev
     return None
+
+
+def runtime_tmpdir(env) -> str:
+    """Lock/recording directory (#28 D9): $TMPDIR only when set to a
+    non-empty ABSOLUTE path, else tempfile.gettempdir(). Refusing relative
+    paths matches gettempdir semantics — a relative lock path would mean
+    one lock per cwd and the mutex would silently vanish."""
+    cand = (env or {}).get("TMPDIR", "")
+    if cand and os.path.isabs(cand):
+        return cand
+    return tempfile.gettempdir()
+
+
+def singleton_lock_path(uid: int, tmpdir: str) -> str:
+    """Lock file path for uid (pure, no I/O)."""
+    return os.path.join(tmpdir, f"{LOCK_STEM}-{uid}.lock")
 
 
 class _Overlay:
