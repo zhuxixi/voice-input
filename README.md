@@ -196,7 +196,9 @@ All settings with their defaults and how to change them:
 which is what makes `initial_prompt`/`hotwords` work on NPU (#27). Measured on
 an OmniBook (Core Ultra 258V, whisper-small int8): **~1.0s per 8s dictation
 with the term list applied** (the previous static pipeline did ~0.3s but cannot
-carry hotwords), plus ~1.4s model load per dictation.
+carry hotwords), plus ~1.4s model load per dictation. (The `bench/npu-bench.py`
+script still measures the old static pipeline, so its numbers differ from this
+engine path.)
 
 Prerequisites (all three):
 
@@ -221,8 +223,8 @@ Notes:
   service already sets 240). A compile cache
   (`~/.cache/voice-input/npu-compile-cache`, ~2.4GB incl. legacy entries) cuts
   later model loads to ~1.4s. Safe to delete — rebuilt on next run (one ~155s
-  recompile). Warm it up first by running `./test-mic.sh` once, or just accept
-  one slow first dictation.
+  recompile). Warm it up first by running `VOICE_INPUT_ENGINE=npu ./test-mic.sh`
+  once, or just accept one slow first dictation.
 - Hotwords (`terms.json`) **are supported on NPU** since #27 (stateful pipeline
   + construction-time `word_timestamps`). They are a probabilistic bias, not a
   guarantee — they can occasionally change nearby common words too (observed

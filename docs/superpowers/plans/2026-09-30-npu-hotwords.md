@@ -629,7 +629,7 @@ test_engine.py
 transcribe_once.py
 ```
 
-零改动清单（`git diff main --stat -- voice_hold.py paste.py voice-ptt.py terms.py archive.py media_pause.py voice-ptt.sh voice-toggle.sh test-mic.sh bench download-model.py download-model.sh test_terms.py test_archive.py test_media_pause.py test_hold.py test_paste.py test_bench.py`）输出为空（0 字节）。17 个受保护路径全部未被触碰。
+零改动清单（`git diff main --stat -- voice_hold.py paste.py voice-ptt.py terms.py archive.py media_pause.py voice-ptt.sh voice-toggle.sh test-mic.sh bench download-model.py download-model.sh test_terms.py test_archive.py test_media_pause.py test_hold.py test_paste.py test_bench.py`）输出为空（0 字节）。18 个受保护路径全部未被触碰。
 
 ### 结论
 
