@@ -35,6 +35,13 @@ ENV_DEVICE = "VOICE_INPUT_DEVICE"
 from paste import KEY_RIGHTALT  # noqa: F401  (re-exported for tests/callers)
 EV_KEY = 1          # event type for keys
 
+# Paste delivery timeout (#29): the real paste takes <0.2s (wl-copy sets the
+# clipboard, ydotool injects the combo) — 10s is a 50x margin. The old 30s
+# only amplified false timeouts; see the spec for the wl-copy daemonization
+# mechanism that made PIPE waits hang. No env knob on purpose: the timeout
+# is not a user-tunable semantic.
+PASTE_TIMEOUT = 10
+
 # Key event values (linux/input.h)
 _PRESS, _RELEASE, _REPEAT = 1, 0, 2
 
@@ -66,6 +73,14 @@ def transition(value: int, recording: bool, busy: bool = False):
     if value == _RELEASE and recording:
         return False, False, "stop"
     return recording, False, None
+
+
+def is_dropped_press(value: int, was_busy: bool) -> bool:
+    """True when a key event will be silently dropped because the pipeline
+    is busy (#29 D5): only presses are worth logging — autorepeat fires
+    dozens of times per second while the key is held, release carries no
+    user intent of its own."""
+    return was_busy and value == _PRESS
 
 
 def pick_device(evdev, wanted: str = None):
@@ -246,6 +261,11 @@ class HoldDaemon:
                 print("[voice-hold] recording empty/too short (<1KB)",
                       file=sys.stderr)
                 return
+            # Same-class risk (#29): check_output waits for the stdout pipe
+            # EOF — if a future engine path ever daemonizes a child that
+            # inherits stdout, transcribe will false-timeout exactly like
+            # paste did. Today's faster-whisper / OpenVINO paths do not
+            # fork; keep it that way or drop the pipe here too.
             try:
                 text = subprocess.check_output(
                     [VENV_PY, os.path.join(REPO_DIR, "transcribe_once.py"),
@@ -269,21 +289,45 @@ class HoldDaemon:
             if not text:
                 print("[voice-hold] no speech recognized", flush=True)
                 return
-            try:
-                proc = subprocess.run(
-                    [sys.executable, os.path.join(REPO_DIR, "paste.py")],
-                    input=text.encode(), stderr=subprocess.PIPE, timeout=30)
-            except subprocess.TimeoutExpired:
-                print("[voice-hold] paste timed out (hung child killed) — "
-                      "is ydotoold responsive?", file=sys.stderr)
-                return
-            if proc.returncode != 0:
-                print(f"[voice-hold] paste failed: "
-                      f"{proc.stderr.decode(errors='replace')}", file=sys.stderr)
-                return
-            print(f"[voice-hold] delivered: {text}", flush=True)
+            self._paste_and_report(text)
         finally:
             self.busy = False
+
+    def _spawn_paste(self, text: str):
+        """Paste delivery subprocess (#29): the ONLY place paste.py is spawned.
+
+        Never pass stdout/stderr pipes here: wl-copy daemonizes a clipboard
+        server that inherits the fds, and communicate() would then wait for
+        a pipe EOF that never comes (the 30s false timeout, #29). stderr
+        inherits into the journal instead — paste.py prefixes its own
+        messages. Returns (returncode, timed_out); on timeout subprocess.run
+        has already killed the child ("hung child killed").
+        """
+        try:
+            proc = subprocess.run(
+                [sys.executable, os.path.join(REPO_DIR, "paste.py")],
+                input=text.encode(), timeout=PASTE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return None, True
+        return proc.returncode, False
+
+    def _paste_and_report(self, text: str):
+        """Deliver `text` and log the outcome (#29 test seam: depends only
+        on _spawn_paste so the result branches are unit-testable without
+        faking the transcribe pipeline — driving _deliver would need a real
+        WAVFILE at a fixed /tmp path)."""
+        rc, timed_out = self._spawn_paste(text)
+        if timed_out:
+            print("[voice-hold] paste timed out after "
+                  f"{PASTE_TIMEOUT}s (hung child killed) — paste.py output "
+                  "should be right above; if it isn't, check ydotoold "
+                  "liveness (#29)", file=sys.stderr)
+            return
+        if rc != 0:
+            print(f"[voice-hold] paste failed: paste.py exit {rc}",
+                  file=sys.stderr)
+            return
+        print(f"[voice-hold] delivered: {text}", flush=True)
 
     def _transcribe_timeout(self) -> float:
         raw = self.env.get("VOICE_INPUT_TRANSCRIBE_TIMEOUT", "120")
@@ -295,8 +339,12 @@ class HoldDaemon:
             return 120.0
 
     def handle_key_value(self, value: int):
+        was_busy = self.busy
         self.recording, self.busy, action = transition(
             value, self.recording, self.busy)
+        if is_dropped_press(value, was_busy):
+            print("[voice-hold] key press dropped while busy "
+                  "(transcribe/paste in flight)", file=sys.stderr)
         if action == "start":
             self.start_recording()
         elif action == "stop":

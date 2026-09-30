@@ -1,8 +1,11 @@
+import contextlib
+import io
 import os
 import subprocess
 import sys
 import types
 import unittest
+from unittest import mock
 
 import voice_hold
 
@@ -144,6 +147,114 @@ class TestModulePurity(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         self.assertIn("100 (True, False, 'start')", proc.stdout.decode())
+
+
+class TestPasteSpawnContract(unittest.TestCase):
+    """#29 A1/A4/A5: paste subprocess contract — no stdio pipes (root cause
+    of the 30s false timeout: wl-copy's daemonized clipboard server inherits
+    the pipe and EOF never arrives), pinned timeout/argv/input, and the
+    result branches of _paste_and_report."""
+
+    def _daemon(self):
+        return voice_hold.HoldDaemon(env={})
+
+    def test_no_pipe_timeout_argv_input(self):
+        d = self._daemon()
+        completed = types.SimpleNamespace(returncode=0)
+        with mock.patch.object(voice_hold.subprocess, "run",
+                               return_value=completed) as m:
+            d._spawn_paste("测试文本")
+        kwargs = m.call_args.kwargs
+        self.assertNotIn("stdout", kwargs)   # the #29 root cause — never again
+        self.assertNotIn("stderr", kwargs)
+        self.assertEqual(kwargs.get("timeout"), voice_hold.PASTE_TIMEOUT)
+        self.assertEqual(kwargs["input"], "测试文本".encode())
+        argv = m.call_args.args[0]
+        self.assertEqual(argv[0], sys.executable)
+        self.assertTrue(argv[1].endswith("paste.py"))
+
+    def test_timeout_expired_swallowed(self):
+        d = self._daemon()
+        def raise_timeout(*a, **k):
+            raise voice_hold.subprocess.TimeoutExpired("paste.py", 10)
+        with mock.patch.object(voice_hold.subprocess, "run",
+                               side_effect=raise_timeout):
+            self.assertEqual(d._spawn_paste("x"), (None, True))
+
+    def test_timeout_bound_and_message(self):
+        self.assertLessEqual(voice_hold.PASTE_TIMEOUT, 10)
+        d = self._daemon()
+        d._spawn_paste = lambda text: (None, True)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d._paste_and_report("x")
+        out = err.getvalue()
+        self.assertIn("timed out after", out)
+        self.assertNotIn("ydotoold responsive", out)
+
+    def test_result_branches(self):
+        d = self._daemon()
+        for rc, expect in ((3, "exit 3"), (0, "delivered:")):
+            with self.subTest(rc=rc):
+                d._spawn_paste = lambda text, rc=rc: (rc, False)
+                err = io.StringIO()
+                # capture both streams: the success branch prints to stdout
+                # (flush=True, unchanged pre-#29), the fail/timeout branches
+                # to stderr (spec D3/D4)
+                with contextlib.redirect_stderr(err), \
+                        contextlib.redirect_stdout(err):
+                    d._paste_and_report("hi")
+                out = err.getvalue()
+                self.assertIn(expect, out)
+                self.assertEqual(len(out.strip().splitlines()), 1)
+                if rc != 0:
+                    self.assertNotIn("delivered:", out)
+
+
+class TestBusyDropLogging(unittest.TestCase):
+    """#29 A2: busy-drop observability — a dropped press logs exactly one
+    line; repeat/release stay silent (autorepeat fires dozens per second);
+    drop semantics themselves are unchanged."""
+
+    def _daemon(self):
+        return voice_hold.HoldDaemon(env={})
+
+    def test_is_dropped_press_pure(self):
+        self.assertTrue(voice_hold.is_dropped_press(1, True))
+        self.assertFalse(voice_hold.is_dropped_press(1, False))
+        self.assertFalse(voice_hold.is_dropped_press(2, True))
+        self.assertFalse(voice_hold.is_dropped_press(0, True))
+
+    def test_press_while_busy_logs_one_line(self):
+        d = self._daemon()
+        d.busy = True
+        d.recording = False
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d.handle_key_value(1)
+        out = err.getvalue()
+        self.assertEqual(len(out.strip().splitlines()), 1)
+        self.assertIn("dropped while busy", out)
+        self.assertFalse(d.recording)   # semantics unchanged: no ghost start
+
+    def test_repeat_and_release_silent(self):
+        d = self._daemon()
+        d.busy = True
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d.handle_key_value(2)
+            d.handle_key_value(0)
+        self.assertEqual(err.getvalue(), "")
+
+    def test_normal_press_not_logged(self):
+        d = self._daemon()
+        d.busy = False
+        d.recording = False
+        d.start_recording = lambda: None   # stub: must not spawn arecord
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d.handle_key_value(1)
+        self.assertEqual(err.getvalue(), "")
 
 
 if __name__ == "__main__":
