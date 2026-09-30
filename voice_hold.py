@@ -75,6 +75,14 @@ def transition(value: int, recording: bool, busy: bool = False):
     return recording, False, None
 
 
+def is_dropped_press(value: int, was_busy: bool) -> bool:
+    """True when a key event will be silently dropped because the pipeline
+    is busy (#29 D5): only presses are worth logging — autorepeat fires
+    dozens of times per second while the key is held, release carries no
+    user intent of its own."""
+    return was_busy and value == _PRESS
+
+
 def pick_device(evdev, wanted: str = None):
     """Choose the input device to listen on. `wanted` (VOICE_INPUT_DEVICE) may
     be a device path (/dev/input/eventN) or a case-insensitive name substring;
@@ -331,8 +339,12 @@ class HoldDaemon:
             return 120.0
 
     def handle_key_value(self, value: int):
+        was_busy = self.busy
         self.recording, self.busy, action = transition(
             value, self.recording, self.busy)
+        if is_dropped_press(value, was_busy):
+            print("[voice-hold] key press dropped while busy "
+                  "(transcribe/paste in flight)", file=sys.stderr)
         if action == "start":
             self.start_recording()
         elif action == "stop":

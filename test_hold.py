@@ -211,5 +211,51 @@ class TestPasteSpawnContract(unittest.TestCase):
                     self.assertEqual(len(out.strip().splitlines()), 1)
 
 
+class TestBusyDropLogging(unittest.TestCase):
+    """#29 A2: busy-drop observability — a dropped press logs exactly one
+    line; repeat/release stay silent (autorepeat fires dozens per second);
+    drop semantics themselves are unchanged."""
+
+    def _daemon(self):
+        return voice_hold.HoldDaemon(env={})
+
+    def test_is_dropped_press_pure(self):
+        self.assertTrue(voice_hold.is_dropped_press(1, True))
+        self.assertFalse(voice_hold.is_dropped_press(1, False))
+        self.assertFalse(voice_hold.is_dropped_press(2, True))
+        self.assertFalse(voice_hold.is_dropped_press(0, True))
+
+    def test_press_while_busy_logs_one_line(self):
+        d = self._daemon()
+        d.busy = True
+        d.recording = False
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d.handle_key_value(1)
+        out = err.getvalue()
+        self.assertEqual(len(out.strip().splitlines()), 1)
+        self.assertIn("dropped while busy", out)
+        self.assertFalse(d.recording)   # semantics unchanged: no ghost start
+
+    def test_repeat_and_release_silent(self):
+        d = self._daemon()
+        d.busy = True
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d.handle_key_value(2)
+            d.handle_key_value(0)
+        self.assertEqual(err.getvalue(), "")
+
+    def test_normal_press_not_logged(self):
+        d = self._daemon()
+        d.busy = False
+        d.recording = False
+        d.start_recording = lambda: None   # stub: must not spawn arecord
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            d.handle_key_value(1)
+        self.assertEqual(err.getvalue(), "")
+
+
 if __name__ == "__main__":
     unittest.main()
