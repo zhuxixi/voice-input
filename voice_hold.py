@@ -29,7 +29,6 @@ import engine  # 顶层纯标准库(#16 同款);npu 子进程 env 注入的唯�
 
 REPO_DIR = os.path.dirname(os.path.realpath(__file__))
 VENV_PY = os.path.join(REPO_DIR, "venv", "bin", "python3")
-WAVFILE = "/tmp/voice-input-hold.wav"
 ENV_DEVICE = "VOICE_INPUT_DEVICE"
 
 LOCK_STEM = "voice-input-hold"          # lock filename stem (#28)
@@ -406,8 +405,8 @@ class HoldDaemon:
     def _paste_and_report(self, text: str):
         """Deliver `text` and log the outcome (#29 test seam: depends only
         on _spawn_paste so the result branches are unit-testable without
-        faking the transcribe pipeline — driving _deliver would need a real
-        WAVFILE at a fixed /tmp path)."""
+        faking the transcribe pipeline — driving _deliver would still need
+        a real recording file, per-recording path since #28)."""
         rc, timed_out = self._spawn_paste(text)
         if timed_out:
             print("[voice-hold] paste timed out after "
