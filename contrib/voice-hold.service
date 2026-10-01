@@ -21,6 +21,10 @@ Environment=VOICE_INPUT_MODEL=small-int8-ov
 Environment=VOICE_INPUT_TRANSCRIBE_TIMEOUT=240
 Restart=always
 RestartSec=3
+# #28: exit 4 = another voice_hold already holds the singleton flock.
+# Never restart-loop on it — the other instance is the live one; stopping
+# it and `systemctl --user restart voice-hold` is the recovery path.
+RestartPreventExitStatus=4
 
 [Install]
 WantedBy=graphical-session.target

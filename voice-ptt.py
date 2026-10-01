@@ -4,6 +4,7 @@
 import os
 import subprocess
 import sys
+import tempfile
 
 # Derive the repo location from this file (#11): works from any clone path.
 # realpath matches the shell wrappers' readlink -f, so invoking through a
@@ -57,7 +58,11 @@ from gi.repository import Gtk, GLib, Gdk
 
 from pynput import keyboard
 
-WAVFILE = "/tmp/voice-input-recording.wav"
+# Per-recording unique path (#28 D7): no more shared fixed name — a
+# voice-ptt instance and a voice-toggle run (both X11 path, same old name)
+# used to truncate/delete each other's recording. Assigned in
+# start_recording; stop_recording snapshots it before its 0.3s settle.
+WAVFILE = None
 
 recording = False
 rec_proc = None
@@ -119,7 +124,7 @@ def load_model():
 
 
 def start_recording():
-    global recording, rec_proc, active_window, _paused_players
+    global recording, rec_proc, active_window, _paused_players, WAVFILE
     if recording:
         return
     recording = True
@@ -129,8 +134,18 @@ def start_recording():
         ).decode().strip()
     except Exception:
         active_window = None
-    if os.path.exists(WAVFILE):
-        os.unlink(WAVFILE)
+    try:
+        fd, WAVFILE = tempfile.mkstemp(prefix="voice-input-recording-",
+                                        suffix=".wav")
+        os.close(fd)
+    except OSError as e:
+        # mkstemp 失败(ENOSPC/EACCES/EMFILE)不得逸出到 pynput 回调:pynput 的
+        # listener 线程对回调异常会 stop()+re-raise,热键死到手工重启(voice-ptt
+        # 无 systemd unit)。回滚状态并返回,让下一次按键可重试(CR r2)。
+        recording = False
+        print(f"[voice-input] cannot create recording file: {e}",
+              file=sys.stderr)
+        return
     if PAUSE_MEDIA_ENABLED:
         try:
             paused = pause_playing()  # D-Bus 在锁外执行,不阻塞其它线程
@@ -157,6 +172,16 @@ def stop_recording():
     if not recording:
         return
     recording = False
+    wav = WAVFILE  # snapshot: a fast re-press during the 0.3s settle must
+                   # not swap the path under this transcription (#28)
+    if not wav:
+        # mkstemp 在 start_recording 里抛 OSError 时(ENOSPC/EACCES/EMFILE),
+        # recording 已置 True 而路径为 None——此刻无 arecord/媒体/浮层需要收尾
+        # (它们都在 mkstemp 之后才启动),直接返回恢复状态;否则下次按键
+        # os.path.exists(None) 抛 TypeError,PTT 热键死到进程重启(CR r1)。
+        print("[voice-input] no recording path (start failed earlier)",
+              file=sys.stderr)
+        return
     # 局部快照 rec_proc:terminate 目标用局部 rec,避免 clobber 快速重录时 press2
     # 写入的新 arecord(cc#7)。不置 rec_proc=None(同因);全局由下次 start 覆盖。
     rec = rec_proc
@@ -198,7 +223,14 @@ def stop_recording():
     GLib.idle_add(hide_overlay)
     time.sleep(0.3)
 
-    if not os.path.exists(WAVFILE) or os.path.getsize(WAVFILE) < 1000:
+    if not os.path.exists(wav) or os.path.getsize(wav) < 1000:
+        # unique per-recording slots never self-clean like the old fixed
+        # WAVFILE did (start_recording no longer unlinks); drop the short/
+        # empty tap here (#28) — mirrors voice_hold.py
+        try:
+            os.unlink(wav)
+        except OSError:
+            pass
         print("[voice-input] recording empty/too short (<1KB); arecord may have failed (EBUSY/device busy?)", file=sys.stderr)
         return
 
@@ -216,7 +248,7 @@ def stop_recording():
             prompt = None
             extra_kw = {}
         segments, info = m.transcribe(
-            WAVFILE,
+            wav,
             language="zh",
             initial_prompt=prompt,
             **extra_kw,
@@ -227,13 +259,13 @@ def stop_recording():
         text = ""
     finally:
         # 归档(独立 try,失败不影响转写/粘贴)
-        if ARCHIVE_ENABLED and text and os.path.exists(WAVFILE):
+        if ARCHIVE_ENABLED and text and os.path.exists(wav):
             try:
-                archive_recording(WAVFILE, text, text)
+                archive_recording(wav, text, text)
             except Exception as ae:
                 print(f"[voice-input] archive failed: {ae}", file=sys.stderr)
-        if os.path.exists(WAVFILE):  # 异常/归档失败 → wav 还在 → 清理
-            os.unlink(WAVFILE)
+        if os.path.exists(wav):  # 异常/归档失败 → wav 还在 → 清理
+            os.unlink(wav)
 
     if text:
         if active_window:

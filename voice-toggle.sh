@@ -31,12 +31,27 @@ if [ -n "$LIB_PATHS" ]; then
 fi
 
 PIDFILE="/tmp/voice-input-recording.pid"
-WAVFILE="/tmp/voice-input-recording.wav"
 
 if [ -f "$PIDFILE" ]; then
     # 第二次按：停止录音 → 转写 → 打字
     PID=$(cat "$PIDFILE")
     rm -f "$PIDFILE"
+
+    # #28 D7: 录音路径由第一次按写进 sidecar —— 两次按是**两个进程**,本进程
+    # 自算 mkstemp 会去等一个永远不会被写入的新空文件(死等)。sidecar 缺失/
+    # 为空,或指向的 wav 已不在 → 视为无录音在跑,报错退出,不转写不删文件。
+    if [ ! -s "$PIDFILE.wav" ]; then
+        echo "voice-toggle.sh: no recording in progress — $PIDFILE.wav missing/empty" >&2
+        rm -f "$PIDFILE.wav"
+        exit 1
+    fi
+    WAVFILE=$(cat "$PIDFILE.wav")
+    if [ ! -f "$WAVFILE" ]; then
+        echo "voice-toggle.sh: no recording in progress — $PIDFILE.wav points at a missing wav" >&2
+        rm -f "$PIDFILE.wav"
+        exit 1
+    fi
+
     kill "$PID" 2>/dev/null
     sleep 0.5
 
@@ -51,7 +66,7 @@ if [ -f "$PIDFILE" ]; then
     # 预检已挡掉绝大多数配置错误,这里失败时终端里能看到真实原因
     TEXT=$("$VENV/bin/python3" "$REPO_DIR/transcribe_once.py" "$WAVFILE")
 
-    rm -f "$WAVFILE"
+    rm -f "$WAVFILE" "$PIDFILE.wav"
 
     if [ -n "$TEXT" ]; then
         # 上屏分流走 paste.py(#18 v3):wayland 粘贴(wl-copy+ydotool)/直打,x11 保留
@@ -93,6 +108,9 @@ except (ValueError, RuntimeError) as e:
     fi
 
     # 开始录音
+    # Per-recording unique path (#28 D7): no shared fixed name with voice-ptt.py
+    WAVFILE="$(mktemp --suffix=.wav "${TMPDIR:-/tmp}/voice-input-recording-XXXXXX")"
+    printf '%s\n' "$WAVFILE" > "$PIDFILE.wav"
     # 走 PipeWire default，与 voice-ptt.py #6 行为一致，避免 EBUSY 抢占
     arecord -q -f S16_LE -r 16000 -c 1 -D default "$WAVFILE" &
     echo $! > "$PIDFILE"

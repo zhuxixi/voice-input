@@ -1,8 +1,11 @@
 import contextlib
 import io
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import types
 import unittest
 from unittest import mock
@@ -255,6 +258,287 @@ class TestBusyDropLogging(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             d.handle_key_value(1)
         self.assertEqual(err.getvalue(), "")
+
+
+class TestSingletonLock(unittest.TestCase):
+    """A1-A6 (#28): lock path derivation + flock semantics. All fs work is
+    isolated under a per-test tmpdir; nothing here touches arecord/evdev."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="vh-lock-test-")
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+
+    def _path(self):
+        return voice_hold.singleton_lock_path(os.getuid(), self._tmp)
+
+    # A1
+    def test_runtime_tmpdir_env_variants(self):
+        self.assertEqual(voice_hold.runtime_tmpdir({"TMPDIR": "/var/tmp"}),
+                         "/var/tmp")
+        self.assertEqual(voice_hold.runtime_tmpdir({}),
+                         tempfile.gettempdir())
+        self.assertEqual(voice_hold.runtime_tmpdir({"TMPDIR": ""}),
+                         tempfile.gettempdir())
+        # D9: relative TMPDIR must be refused — a relative lock path would
+        # mean one lock per cwd and the mutex would silently vanish
+        self.assertEqual(voice_hold.runtime_tmpdir({"TMPDIR": "rel/dir"}),
+                         tempfile.gettempdir())
+
+    # A1
+    def test_singleton_lock_path_contract(self):
+        p = voice_hold.singleton_lock_path(1000, "/var/tmp")
+        self.assertEqual(p, "/var/tmp/voice-input-hold-1000.lock")
+        self.assertEqual(voice_hold.singleton_lock_path(0, "/x"),
+                         "/x/voice-input-hold-0.lock")
+
+    # A2 + A6
+    def test_second_acquire_blocked_pid_reported_fd_not_inheritable(self):
+        path = self._path()
+        fd, holder, err = voice_hold.acquire_singleton_lock(path)
+        self.assertIsNotNone(fd)
+        self.assertIsNone(holder)
+        self.assertIsNone(err)
+        # M3: children (arecord/transcribe) must never hold the lock — a
+        # hung child keeping the flock past parent death would make every
+        # new instance refuse to start (permanent deafness)
+        self.assertFalse(os.get_inheritable(fd))
+        self.addCleanup(os.close, fd)
+        fd2, holder2, err2 = voice_hold.acquire_singleton_lock(path)
+        self.assertIsNone(fd2)
+        self.assertIsNone(err2)
+        self.assertEqual(holder2, os.getpid())  # we are the holder
+        with open(path) as f:  # file carries our pid for the next acquirer
+            self.assertEqual(f.read(), str(os.getpid()))
+
+    # Review Focus 3 + review round 1: garbage in the pid slot (crash
+    # mid-write) degrades to holder=None instead of crashing the failed
+    # acquirer. b"\xc2\xb2" decodes to U+00B2 "²": str.isdigit() is true
+    # for it but int() raises ValueError — the isascii guard must catch it.
+    def test_garbage_lock_file_content_degrades_to_no_holder(self):
+        path = self._path()
+        fd, _, _ = voice_hold.acquire_singleton_lock(path)
+        self.addCleanup(os.close, fd)
+        for garbage in (b"not-a-pid", b"\xc2\xb2"):
+            with self.subTest(garbage=garbage):
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.truncate(fd, 0)
+                os.write(fd, garbage)
+                fd2, holder2, err2 = voice_hold.acquire_singleton_lock(path)
+                self.assertIsNone(fd2)
+                self.assertIsNone(err2)
+                self.assertIsNone(holder2)
+
+    # A3
+    def test_release_then_reacquire_no_stale_lock(self):
+        path = self._path()
+        fd, _, _ = voice_hold.acquire_singleton_lock(path)
+        self.assertIsNotNone(fd)
+        os.close(fd)  # process-death analogue: kernel releases the flock
+        fd2, _, err2 = voice_hold.acquire_singleton_lock(path)
+        self.assertIsNotNone(fd2)
+        self.assertIsNone(err2)
+        os.close(fd2)
+
+    # A5 / Review Focus 2: un-openable lock file must not raise
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses file permissions")
+    def test_open_failure_never_raises(self):
+        # occupied-by-another semantics: a file we lack permission to open
+        p = os.path.join(self._tmp, "blocked.lock")
+        fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o600)
+        os.close(fd)
+        os.chmod(p, 0)
+        self.addCleanup(os.chmod, p, 0o600)
+        res = voice_hold.acquire_singleton_lock(p)
+        self.assertIsNone(res[0])
+        self.assertIsNone(res[1])
+        self.assertTrue(res[2])  # readable errno string, no exception
+        # symlink must be rejected by O_NOFOLLOW (ELOOP)
+        target = os.path.join(self._tmp, "target")
+        with open(target, "w"):
+            pass
+        link = os.path.join(self._tmp, "link.lock")
+        os.symlink(target, link)
+        res2 = voice_hold.acquire_singleton_lock(link)
+        self.assertIsNone(res2[0])
+        self.assertIsNone(res2[1])
+        self.assertTrue(res2[2])
+
+    # A4 — real second process, with the B2 ready-line handshake: asserting
+    # before the child provably holds the lock would race its flock and
+    # flip the assertion (chronic-flaky classic, cf. pi-agent-board #95)
+    def test_cross_process_mutex(self):
+        path = self._path()
+        code = (
+            "import sys, time; sys.path.insert(0, %r); import voice_hold;"
+            "fd, _, _ = voice_hold.acquire_singleton_lock(%r);"
+            "assert fd is not None, 'child failed to acquire';"
+            "print('ready', flush=True); time.sleep(30)"
+        ) % (REPO, path)
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.PIPE, text=True, cwd=REPO)
+        try:
+            # bounded handshake read: a bare readline() on a child that
+            # never prints would wedge the suite until the 30s sleep ends
+            line = []
+            reader = threading.Thread(
+                target=lambda: line.append(proc.stdout.readline()),
+                daemon=True)
+            reader.start()
+            reader.join(5)
+            self.assertFalse(reader.is_alive(), "handshake did not arrive in 5s")
+            self.assertEqual(line[0].strip(), "ready")
+            fd, holder, err = voice_hold.acquire_singleton_lock(path)
+            self.assertIsNone(fd)
+            self.assertIsNone(err)
+            self.assertEqual(holder, proc.pid)
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)  # the flock dies with the child
+        fd2, _, err2 = voice_hold.acquire_singleton_lock(path)
+        self.assertIsNotNone(fd2)  # A3 semantics across processes
+        self.assertIsNone(err2)
+        os.close(fd2)
+
+
+class TestRecordingPath(unittest.TestCase):
+    """A7/A8/A10 (#28): per-recording unique wav path through
+    start_recording/_deliver, with arecord/paste/transcribe mocked."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="vh-wav-test-")
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+
+    def _daemon(self):
+        d = voice_hold.HoldDaemon(env={"TMPDIR": self._tmp,
+                                       "VOICE_INPUT_ENGINE": "cpu"})
+        d.overlay = mock.Mock()   # never touch GTK from tests
+        d._media_pause = None     # never touch D-Bus from tests
+        return d
+
+    # A7
+    def test_new_recording_path_unique_in_dir(self):
+        p1 = voice_hold.new_recording_path(self._tmp)
+        p2 = voice_hold.new_recording_path(self._tmp)
+        self.assertNotEqual(p1, p2)
+        for p in (p1, p2):
+            self.assertEqual(os.path.dirname(p), self._tmp)
+            self.assertTrue(os.path.exists(p))  # slot created
+            self.assertEqual(os.path.getsize(p), 0)
+
+    # A7 + A10
+    def test_start_recording_uses_fresh_path_and_logs_it(self):
+        d = self._daemon()
+        with mock.patch.object(voice_hold.subprocess, "Popen") as popen, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            d.start_recording()
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[0], "arecord")
+        self.assertEqual(argv[-1], d.wav_path)          # A7: unique path
+        self.assertTrue(os.path.exists(d.wav_path))     # slot exists
+        self.assertIn("recording -> ", out.getvalue())  # A10: log carries it
+        self.assertIn(d.wav_path, out.getvalue())
+
+    # A7/M1/Review Focus 5: arecord spawn failure leaves no empty slot
+    def test_start_recording_popen_failure_leaves_no_file(self):
+        d = self._daemon()
+
+        def boom(*a, **k):
+            raise OSError("arecord missing")
+
+        with mock.patch.object(voice_hold.subprocess, "Popen",
+                               side_effect=boom):
+            with self.assertRaises(OSError):
+                d.start_recording()
+        self.assertFalse(os.path.exists(d.wav_path))
+
+    # A8
+    def test_deliver_transcribes_instance_path_and_cleans_up(self):
+        d = self._daemon()
+        wav = voice_hold.new_recording_path(self._tmp)
+        with open(wav, "wb") as f:
+            f.write(b"\0" * 2048)   # pass the <1KB guard without arecord
+        d.wav_path = wav
+        d._spawn_paste = mock.Mock(return_value=(0, False))  # #29 seam
+        with mock.patch.object(voice_hold.subprocess, "check_output",
+                               return_value="你好\n") as co:
+            d._deliver()
+        argv = co.call_args.args[0]
+        self.assertTrue(argv[1].endswith("transcribe_once.py"))
+        self.assertEqual(argv[2], wav)              # A8: argv carries it
+        self.assertFalse(os.path.exists(wav))       # A8: cleaned up
+        d._spawn_paste.assert_called_once_with("你好")
+        self.assertFalse(d.busy)                    # always un-busied
+
+    # Review Focus 6: worker survives a missing wav_path (snapshot guard)
+    def test_deliver_without_path_reports_and_returns(self):
+        d = self._daemon()
+        d.wav_path = None
+        with mock.patch.object(voice_hold.subprocess, "check_output") as co:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                d._deliver()
+        co.assert_not_called()
+        self.assertIn("no recording path", err.getvalue())
+        self.assertFalse(d.busy)
+
+
+class TestDuplicateInstance(unittest.TestCase):
+    """A9 (#28): a failed lock acquisition exits 4 before any listening."""
+
+    def _daemon(self):
+        return voice_hold.HoldDaemon(env={})
+
+    def test_busy_lock_exits_4_without_listening(self):
+        d = self._daemon()
+        with mock.patch.object(
+                voice_hold, "acquire_singleton_lock",
+                return_value=(None, 4242, None)), \
+             mock.patch.object(
+                 voice_hold.HoldDaemon, "_preflight",
+                 return_value=[]) as pre, \
+             mock.patch.object(voice_hold, "pick_device") as pick:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                rc = d.run()
+        self.assertEqual(rc, 4)
+        self.assertEqual(rc, voice_hold.EXIT_DUPLICATE_INSTANCE)
+        pre.assert_not_called()   # D5: lock gate comes before preflight
+        pick.assert_not_called()
+        out = err.getvalue()
+        self.assertIn("another instance already running", out)
+        self.assertIn("last holder pid 4242", out)
+        self.assertEqual(len(out.strip().splitlines()), 1)
+
+    # Review Focus 2: un-openable lock maps to exit 4 too (never a
+    # traceback exit code that would defeat RestartPreventExitStatus)
+    def test_open_error_exits_4_with_errno_message(self):
+        d = self._daemon()
+        with mock.patch.object(
+                voice_hold, "acquire_singleton_lock",
+                return_value=(None, None, "Permission denied")), \
+             mock.patch.object(voice_hold, "pick_device") as pick:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                rc = d.run()
+        self.assertEqual(rc, 4)
+        pick.assert_not_called()
+        out = err.getvalue()
+        self.assertIn("cannot open lock file", out)
+        self.assertIn("Permission denied", out)
+        self.assertEqual(len(out.strip().splitlines()), 1)
+
+    def test_success_keeps_lock_fd_for_process_lifetime(self):
+        d = self._daemon()
+        fd = os.open(os.devnull, os.O_RDONLY)  # stand-in for a real lock fd
+        self.addCleanup(os.close, fd)
+        with mock.patch.object(
+                voice_hold, "acquire_singleton_lock",
+                return_value=(fd, None, None)), \
+             mock.patch.object(
+                 voice_hold.HoldDaemon, "_preflight",
+                 return_value=["fake missing item"]):
+            with contextlib.redirect_stderr(io.StringIO()):
+                rc = d.run()   # preflight failure -> 3 (existing semantics)
+        self.assertEqual(rc, 3)
+        self.assertEqual(d._lock_fd, fd)   # held, not closed
 
 
 if __name__ == "__main__":

@@ -17,9 +17,11 @@ Device permission: reading /dev/input/event* requires the `input` group
 root:input by default). Needs a re-login after `usermod -aG input $USER`.
 """
 
+import fcntl
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -27,8 +29,12 @@ import engine  # 顶层纯标准库(#16 同款);npu 子进程 env 注入的唯�
 
 REPO_DIR = os.path.dirname(os.path.realpath(__file__))
 VENV_PY = os.path.join(REPO_DIR, "venv", "bin", "python3")
-WAVFILE = "/tmp/voice-input-hold.wav"
 ENV_DEVICE = "VOICE_INPUT_DEVICE"
+
+LOCK_STEM = "voice-input-hold"          # lock filename stem (#28)
+EXIT_DUPLICATE_INSTANCE = 4             # D3: refused start, never restart-loop
+RECORDING_PREFIX = "voice-input-hold-"  # per-recording wav prefix (#28)
+RECORDING_SUFFIX = ".wav"
 
 # KEY_RIGHTALT 单源在 paste.py(evdev KEY_RIGHTALT, linux/input-event-codes.h
 # 稳定 ABI);paste 顶层纯 stdlib,顶层 import 不破纯净性契约
@@ -99,6 +105,76 @@ def pick_device(evdev, wanted: str = None):
         if is_keyboard_device(dev.name, key_codes):
             return dev
     return None
+
+
+def runtime_tmpdir(env) -> str:
+    """Lock/recording directory (#28 D9): $TMPDIR only when set to a
+    non-empty ABSOLUTE path, else tempfile.gettempdir(). Refusing relative
+    paths matches gettempdir semantics — a relative lock path would mean
+    one lock per cwd and the mutex would silently vanish."""
+    cand = (env or {}).get("TMPDIR", "")
+    if cand and os.path.isabs(cand):
+        return cand
+    return tempfile.gettempdir()
+
+
+def singleton_lock_path(uid: int, tmpdir: str) -> str:
+    """Lock file path for uid (pure, no I/O)."""
+    return os.path.join(tmpdir, f"{LOCK_STEM}-{uid}.lock")
+
+
+def acquire_singleton_lock(path: str):
+    """Single-instance gate — the only place flock lives (#28).
+
+    Returns (fd, holder_pid, error); NEVER raises (spec D3/B1):
+      success        -> (fd, None, None) — caller keeps fd open for the
+                        process lifetime (close releases the lock); fd is
+                        non-inheritable (PEP 446) so arecord/transcribe
+                        children never hold the lock (spec M3).
+      already locked -> (None, <pid read from the file, best effort>, None)
+      cannot open    -> (None, None, "<strerror>")  # EACCES/ELOOP/… incl.
+                                                              O_NOFOLLOW
+    The pid inside the file is diagnostic only ("last holder" — may be a
+    dead predecessor); the mutex decision is always the flock itself.
+    """
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        return None, None, (os.strerror(e.errno) if e.errno else str(e))
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        holder = None
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            data = os.read(fd, 32).decode(errors="replace").strip()
+            # isascii guard: str.isdigit() accepts Unicode digits that
+            # int() rejects (e.g. "²"), which would escape the contract
+            if data.isascii() and data.isdigit():
+                holder = int(data)
+        except OSError:
+            pass
+        os.close(fd)
+        return None, holder, None
+    except OSError as e:
+        os.close(fd)
+        return None, None, (os.strerror(e.errno) if e.errno else str(e))
+    try:  # record our pid for the next failed acquirer (diagnostic only)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.truncate(fd, 0)
+        os.write(fd, str(os.getpid()).encode())
+    except OSError:
+        pass
+    return fd, None, None
+
+
+def new_recording_path(tmpdir: str) -> str:
+    """Fresh unique recording slot (#28 D4): mkstemp gives O_EXCL creation
+    (no TOCTOU with another instance); arecord opens/truncates the path."""
+    fd, path = tempfile.mkstemp(
+        prefix=RECORDING_PREFIX, suffix=RECORDING_SUFFIX, dir=tmpdir)
+    os.close(fd)
+    return path
 
 
 class _Overlay:
@@ -194,6 +270,8 @@ class HoldDaemon:
         self.recording = False
         self.busy = False
         self.rec_proc = None
+        self.wav_path = None  # per-recording path, set by start_recording (#28)
+        self._lock_fd = None  # singleton flock held for process lifetime (#28)
         self.overlay = _Overlay()
         self._paused = []
         self._media_pause = None
@@ -205,19 +283,27 @@ class HoldDaemon:
             print(f"[voice-hold] media_pause unavailable: {e}", file=sys.stderr)
 
     def start_recording(self):
-        if os.path.exists(WAVFILE):
-            os.unlink(WAVFILE)
+        self.wav_path = new_recording_path(runtime_tmpdir(self.env))
         if self._media_pause and self._media_pause.PAUSE_MEDIA_ENABLED:
             try:
                 self._paused = self._media_pause.pause_playing()
             except Exception as e:
                 print(f"[voice-hold] pause_media failed: {e}", file=sys.stderr)
-        self.rec_proc = subprocess.Popen(
-            ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1",
-             "-D", "default", WAVFILE],
-            stdout=subprocess.DEVNULL, stderr=sys.stderr)
+        try:
+            self.rec_proc = subprocess.Popen(
+                ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1",
+                 "-D", "default", self.wav_path],
+                stdout=subprocess.DEVNULL, stderr=sys.stderr)
+        except Exception:
+            # M1 (#28): leave no empty slot behind; daemon crash/restart
+            # semantics unchanged (the exception still propagates)
+            try:
+                os.unlink(self.wav_path)
+            except OSError:
+                pass
+            raise
         self.overlay.show("● REC", "#ff5555")
-        print("[voice-hold] recording...", flush=True)
+        print(f"[voice-hold] recording -> {self.wav_path}", flush=True)
 
     def stop_recording(self):
         """同步快停(毫秒~2.5s 级):杀录音、恢复媒体、藏浮层;转写+上屏交给
@@ -257,7 +343,18 @@ class HoldDaemon:
         注意本函数不触碰 GTK(工作线程非 GTK 主线程)。"""
         try:
             time.sleep(0.3)  # let arecord finish flushing the wav (mirrors voice-ptt)
-            if not os.path.exists(WAVFILE) or os.path.getsize(WAVFILE) < 1000:
+            wav = self.wav_path  # snapshot: busy-drop keeps this stable, but
+            if not wav:          # never trust a None path in a worker thread
+                print("[voice-hold] no recording path (internal error)",
+                      file=sys.stderr)
+                return
+            if not os.path.exists(wav) or os.path.getsize(wav) < 1000:
+                # unique per-recording slots never self-clean like the old
+                # fixed WAVFILE did — drop the short/empty tap here (#28)
+                try:
+                    os.unlink(wav)
+                except OSError:
+                    pass
                 print("[voice-hold] recording empty/too short (<1KB)",
                       file=sys.stderr)
                 return
@@ -269,7 +366,7 @@ class HoldDaemon:
             try:
                 text = subprocess.check_output(
                     [VENV_PY, os.path.join(REPO_DIR, "transcribe_once.py"),
-                     WAVFILE],
+                     wav],
                     # npu 时注入 NPU 库目录(ld.so 只在子进程启动读一次);
                     # 其他引擎原样拷贝,维持现状(#19)
                     env=engine.child_env(self.env),
@@ -284,8 +381,8 @@ class HoldDaemon:
                 print(f"[voice-hold] transcribe failed: {e}", file=sys.stderr)
                 text = ""
             finally:
-                if os.path.exists(WAVFILE):
-                    os.unlink(WAVFILE)
+                if os.path.exists(wav):
+                    os.unlink(wav)
             if not text:
                 print("[voice-hold] no speech recognized", flush=True)
                 return
@@ -314,8 +411,8 @@ class HoldDaemon:
     def _paste_and_report(self, text: str):
         """Deliver `text` and log the outcome (#29 test seam: depends only
         on _spawn_paste so the result branches are unit-testable without
-        faking the transcribe pipeline — driving _deliver would need a real
-        WAVFILE at a fixed /tmp path)."""
+        faking the transcribe pipeline — driving _deliver would still need
+        a real recording file, per-recording path since #28)."""
         rc, timed_out = self._spawn_paste(text)
         if timed_out:
             print("[voice-hold] paste timed out after "
@@ -365,6 +462,23 @@ class HoldDaemon:
         return missing
 
     def run(self) -> int:
+        lock_path = singleton_lock_path(os.getuid(),
+                                        runtime_tmpdir(self.env))
+        fd, holder, err = acquire_singleton_lock(lock_path)
+        if fd is None:
+            # D3/B1 (#28): busy AND un-openable both exit 4 — any other
+            # exit path would restart-loop under Restart=always until the
+            # start limit trips. Exit 4 is pinned by RestartPreventExitStatus.
+            if err is None:
+                holder_disp = holder if holder is not None else "unknown"
+                detail = ("another instance already running (last holder pid "
+                          f"{holder_disp}) — lock {lock_path}")
+            else:
+                detail = f"cannot open lock file {lock_path}: {err}"
+            print(f"[voice-hold] {detail} — refusing to start",
+                  file=sys.stderr)
+            return EXIT_DUPLICATE_INSTANCE
+        self._lock_fd = fd  # close = release; process exit releases anyway
         missing = self._preflight()
         if missing:
             for m in missing:
