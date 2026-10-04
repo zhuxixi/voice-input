@@ -172,5 +172,19 @@ class TestCrRound1Fixes(unittest.TestCase):
                 bench._load_wav(p)
 
 
+class TestHoldLatencyDryRun(unittest.TestCase):
+    """A13 (#25): argument surface only — never loads a model."""
+
+    def test_dry_run_prints_both_paths(self):
+        proc = subprocess.run(
+            [sys.executable, os.path.join(_REPO, "bench", "hold-latency.py"),
+             "--dry-run", "--wav", "/tmp/does-not-exist.wav", "--runs", "3"],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("transcribe_once.py", proc.stdout)
+        self.assertIn("transcribe_worker.py", proc.stdout)
+        self.assertIn("/tmp/does-not-exist.wav", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
