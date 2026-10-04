@@ -1,4 +1,5 @@
 import contextlib
+import engine
 import io
 import os
 import shutil
@@ -539,6 +540,46 @@ class TestDuplicateInstance(unittest.TestCase):
                 rc = d.run()   # preflight failure -> 3 (existing semantics)
         self.assertEqual(rc, 3)
         self.assertEqual(d._lock_fd, fd)   # held, not closed
+
+
+class TestSupervisorWiring(unittest.TestCase):
+    """A9 (#25): construction contract, background prewarm, finally-shutdown."""
+
+    def test_supervisor_constructed_with_venv_worker_and_child_env(self):
+        env = {"VOICE_INPUT_ENGINE": "npu", "LD_LIBRARY_PATH": ""}
+        with mock.patch.object(voice_hold, "WorkerSupervisor") as Sup:
+            d = voice_hold.HoldDaemon(env)
+        args, kwargs = Sup.call_args
+        self.assertEqual(args[0], [voice_hold.VENV_PY,
+                                   os.path.join(voice_hold.REPO_DIR, "transcribe_worker.py")])
+        self.assertEqual(args[1], engine.child_env(env))
+        self.assertIs(d.supervisor, Sup.return_value)
+
+    def test_resident_flag_follows_env(self):
+        with mock.patch.object(voice_hold, "WorkerSupervisor"):
+            self.assertTrue(voice_hold.HoldDaemon({"VOICE_INPUT_ENGINE": "cpu"}).resident)
+            self.assertFalse(voice_hold.HoldDaemon(
+                {"VOICE_INPUT_ENGINE": "cpu", "VOICE_INPUT_RESIDENT": "0"}).resident)
+
+    def test_prewarm_runs_in_background_and_never_raises(self):
+        with mock.patch.object(voice_hold, "WorkerSupervisor") as Sup:
+            Sup.return_value.prewarm.side_effect = RuntimeError("boom")
+            d = voice_hold.HoldDaemon({"VOICE_INPUT_ENGINE": "cpu"})
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                d._prewarm()
+        self.assertIn("prewarm failed", err.getvalue())
+
+    def test_run_shuts_the_supervisor_down_even_on_crash(self):
+        with mock.patch.object(voice_hold, "WorkerSupervisor") as Sup, \
+             mock.patch.object(voice_hold, "acquire_singleton_lock",
+                               return_value=(3, None, None)), \
+             mock.patch.object(voice_hold.HoldDaemon, "_preflight", return_value=[]), \
+             mock.patch.object(voice_hold, "pick_device", side_effect=RuntimeError("boom")):
+            d = voice_hold.HoldDaemon({"VOICE_INPUT_ENGINE": "cpu"})
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(RuntimeError):
+                    d.run()
+        self.assertEqual(Sup.return_value.shutdown.call_count, 1)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ import threading
 import time
 
 import engine  # 顶层纯标准库(#16 同款);npu 子进程 env 注入的唯一来源(#19)
+from worker_supervisor import WorkerSupervisor, resident_enabled  # #25 驻留转写
 
 REPO_DIR = os.path.dirname(os.path.realpath(__file__))
 VENV_PY = os.path.join(REPO_DIR, "venv", "bin", "python3")
@@ -272,6 +273,14 @@ class HoldDaemon:
         self.rec_proc = None
         self.wav_path = None  # per-recording path, set by start_recording (#28)
         self._lock_fd = None  # singleton flock held for process lifetime (#28)
+        # #25: resident worker supervisor (stdlib-only import keeps the
+        # purity contract); constructed before any process work so run()
+        # can shut it down on every exit path.
+        self.resident = resident_enabled(self.env)
+        self.supervisor = WorkerSupervisor(
+            [VENV_PY, os.path.join(REPO_DIR, "transcribe_worker.py")],
+            engine.child_env(self.env),
+        )
         self.overlay = _Overlay()
         self._paused = []
         self._media_pause = None
@@ -447,6 +456,13 @@ class HoldDaemon:
         elif action == "stop":
             self.stop_recording()
 
+    def _prewarm(self):
+        """Background prewarm thread: never let a failure reach the read loop."""
+        try:
+            self.supervisor.prewarm()
+        except Exception as e:
+            print(f"[voice-hold] prewarm failed: {e}", file=sys.stderr)
+
     def _preflight(self) -> list:
         """启动预检(CR 发现 4/5):把所有「首次按键才会炸」的缺失提前到启动时报清。
         返回缺失项描述列表,空 = 全部就绪。"""
@@ -479,30 +495,38 @@ class HoldDaemon:
                   file=sys.stderr)
             return EXIT_DUPLICATE_INSTANCE
         self._lock_fd = fd  # close = release; process exit releases anyway
-        missing = self._preflight()
-        if missing:
-            for m in missing:
-                print(f"[voice-hold] preflight: {m}", file=sys.stderr)
-            return 3
         try:
-            import evdev
-        except ImportError:
-            print("[voice-hold] python-evdev missing — pacman -S python-evdev",
-                  file=sys.stderr)
-            return 3
-        dev = pick_device(evdev, self.env.get(ENV_DEVICE))
-        if dev is None:
-            print(
-                "[voice-hold] no keyboard device with KEY_RIGHTALT found — "
-                "check `input` group membership (needs re-login) or set "
-                f"{ENV_DEVICE}", file=sys.stderr)
-            return 3
-        print(f"[voice-hold] listening on {dev.path} ({dev.name})", flush=True)
-        # read_loop blocks; unplug raises OSError -> crash -> systemd restarts
-        for event in dev.read_loop():
-            if event.type == EV_KEY and event.code == KEY_RIGHTALT:
-                self.handle_key_value(event.value)
-        return 0
+            missing = self._preflight()
+            if missing:
+                for m in missing:
+                    print(f"[voice-hold] preflight: {m}", file=sys.stderr)
+                return 3
+            try:
+                import evdev
+            except ImportError:
+                print("[voice-hold] python-evdev missing — pacman -S python-evdev",
+                      file=sys.stderr)
+                return 3
+            dev = pick_device(evdev, self.env.get(ENV_DEVICE))
+            if dev is None:
+                print(
+                    "[voice-hold] no keyboard device with KEY_RIGHTALT found — "
+                    "check `input` group membership (needs re-login) or set "
+                    f"{ENV_DEVICE}", file=sys.stderr)
+                return 3
+            print(f"[voice-hold] listening on {dev.path} ({dev.name})", flush=True)
+            if self.resident:
+                threading.Thread(target=self._prewarm, daemon=True).start()
+            # read_loop blocks; unplug raises OSError -> crash -> systemd restarts
+            for event in dev.read_loop():
+                if event.type == EV_KEY and event.code == KEY_RIGHTALT:
+                    self.handle_key_value(event.value)
+            return 0
+        finally:
+            # G5 (#25): every post-lock exit path (preflight/evdev/device
+            # failure included) shuts the worker down; idempotent, and a
+            # no-op pre-spawn, so this is strictly stronger than loop-only.
+            self.supervisor.shutdown()
 
 
 def main() -> int:
