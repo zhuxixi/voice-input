@@ -175,7 +175,9 @@ Known limitations (Wayland):
   then `systemctl --user daemon-reload && systemctl --user restart ydotool`.
 - Transcription is bounded by `VOICE_INPUT_TRANSCRIBE_TIMEOUT` (default 120s):
   a hung child is killed and the hotkey keeps working instead of freezing
-  forever. For the first NPU run after a cache wipe use ≥240s (cold compile).
+  forever. With the resident worker a hung worker is killed at the same timeout
+  and rebuilt on the next dictation. For the first NPU run after a cache wipe
+  use ≥240s (cold compile).
 
 ## Configuration
 
@@ -188,6 +190,7 @@ All settings with their defaults and how to change them:
 | `~/.config/voice-input/terms.json` | (none) | Custom vocabulary hotwords, see below | Edit the file |
 | `VOICE_INPUT_WAYLAND_METHOD` | `paste` | Wayland text delivery: `paste` = clipboard paste (`wl-copy` + `ydotool` combo), `type` = simulated typing | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_WAYLAND_METHOD=type` |
 | `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | Paste key combo for the Wayland paste method (terminal convention; use `ctrl+v` for apps like VS Code that only bind plain paste) | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_PASTE_COMBO=ctrl+v` |
+| `VOICE_INPUT_RESIDENT` | `1` (on) | Keep a resident transcription worker: the model stays loaded across dictations (prewarmed at daemon start). `0` = legacy per-dictation spawn (model reloaded every dictation) | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_RESIDENT=0` |
 
 ### NPU engine (Intel AI Boost, e.g. Lunar Lake)
 
@@ -230,8 +233,12 @@ Notes:
   guarantee — they can occasionally change nearby common words too (observed
   example: 语音 → 语言). The Wayland
   hold-to-talk path picks them up via transcribe_once.py.
-- Each dictation still pays ~1.4s model load (subprocess-per-dictation design,
-  #18); a resident transcription worker is tracked as #25.
+- A resident transcription worker keeps the model loaded across dictations
+  (#25): the daemon prewarms it at startup, saving ~1.0–1.45s of model load per
+  dictation. The first dictation after a compile-cache wipe no longer pays the
+  ~155s cold compile inside the dictation — the compile happens at daemon
+  startup instead. `bench/hold-latency.py` measures both paths (resident vs the
+  legacy per-dictation spawn).
 
 ### Custom vocabulary (hotwords)
 
@@ -333,6 +340,12 @@ Measured on a dual RTX 2080 Ti (22.5 GB) machine:
 
 The model is preloaded and stays resident, so transcription after key release is
 nearly instantaneous (no reload per utterance).
+
+On the NPU path the resident transcription worker (#25) holds the model for the
+daemon's lifetime at ~1.1 GB RSS. A hung worker is killed at
+`VOICE_INPUT_TRANSCRIBE_TIMEOUT` and rebuilt on the next dictation; set
+`VOICE_INPUT_RESIDENT=0` to fall back to per-dictation spawns (see
+[Configuration](#configuration)).
 
 ## Hardware Reference
 

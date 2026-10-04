@@ -281,7 +281,7 @@ def main(argv=None) -> int
 | A8 | worker EOF 自退（真进程） | 自动化（integration） | 同上：子进程跑 `worker_main`（fake model），父进程关闭 socket | 子进程在 1s 内自行退出（`poll()` 非 None），退出码 0 |
 | A9 | `_deliver` resident 分支接线 + 构造契约 + 延迟日志 | 自动化（unit） | `python3 -m unittest test_hold -v` | 成功 → 调 `_spawn_paste`；error → 不 paste 且日志含 `worker`；两种路径 `busy` 都复位；`HoldDaemon` 以 `command=[VENV_PY, <repo>/transcribe_worker.py]` 与 `env=engine.child_env(...)` 构造 supervisor（mock 断言）；`stop_recording` 打 release 行、`_deliver` 打 `transcribed in X.XXs (worker\|spawn)` 行；`request` 被以 `timeout=self._transcribe_timeout()` 调用（mock 断言，D6 旋钮不被写死） |
 | A10 | `_deliver` legacy 分支接线 | 自动化（unit） | 同上（`VOICE_INPUT_RESIDENT=0`） | 走 `check_output([VENV_PY, transcribe_once.py, wav])`，不 spawn worker；release 行与 `transcribed in X.XXs (spawn)` 行照打（U4 的 journal 判定依赖） |
-| A11 | 模块纯度 + 静态检查 | 自动化（static） | `python3 -m py_compile voice_hold.py worker_protocol.py worker_supervisor.py transcribe_worker.py`；`TestModulePurity`（voice_hold）全绿；**干净子进程 import 断言覆盖三个新模块**（沿用 `TestModulePurity` 的隔离 env 模式）；`rg -n "transcribe_once" voice_hold.py` 仅剩 legacy 分支一处；`git diff --name-only main -- transcribe_once.py` 为空 | 全部通过；新模块顶层无重依赖 import（重依赖只在 `main()`/工厂内）；CLI 未被改动 |
+| A11 | 模块纯度 + 静态检查 | 自动化（static） | `python3 -m py_compile voice_hold.py worker_protocol.py worker_supervisor.py transcribe_worker.py`；`TestModulePurity`（voice_hold）全绿；**干净子进程 import 断言覆盖三个新模块**（沿用 `TestModulePurity` 的隔离 env 模式）；`rg -n "transcribe_once" voice_hold.py` 仅剩三处合法引用（模块 docstring / legacy 分支 / #18 起的 preflight 存在性检查），旧内联 spawn 调用归零；`git diff --name-only main -- transcribe_once.py` 为空 | 全部通过；新模块顶层无重依赖 import（重依赖只在 `main()`/工厂内）；CLI 未被改动 |
 | A12 | 全仓回归 | 自动化（unit） | README Testing 节（本 issue 更新后同时是套件出处）：`python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker -v` | 全绿；README 命令与实际回归面一致 |
 | A13 | bench 脚本参数面 | 自动化（static/unit） | `python3 bench/hold-latency.py --dry-run --wav /tmp/x.wav --runs 3`（`--dry-run` 不校验文件存在、不加载模型） | 打印两条路径的命令与轮次 |
 | A14 | 常驻路径实测有加速（**本机 + 真引擎**） | 自动化（automated E2E，本机手动触发、无 CI 依赖） | `venv/bin/python3 bench/hold-latency.py --wav <用户自备 8s 中文 wav> --runs 5`（先确认 daemon 空闲；wav 用 `arecord -f S16_LE -r 16000 -c 1 -D default` 录 8s，**放仓外**如 `/tmp`、**不进 git**；不用合成正弦音——它触发 #32 病态，不代表真实听写） | 常驻请求中位 < spawn 全路径中位，差值 ≥0.8s；同时记录 spawn→ready 时间；结果回贴 issue |
@@ -317,11 +317,11 @@ systemctl --user restart voice-hold && systemctl --user status voice-hold | head
 1. **收益上限受 decode 支配**：常驻只消掉固定 1.1–1.45s；#32（解码病态）可让单次 decode 膨胀到 2s+。因此本 issue 的达标口径必须是「短句热路径」。
 2. **常驻占用**：worker 常驻 RSS 1.07–1.10GB，且长期持有 NPU 模型（issue 已接受）。缓解：`VOICE_INPUT_RESIDENT=0` 逃生开关 + 崩溃即重建。
 3. **NPU 驱动级挂死**：worker 挂死由超时覆盖；若驱动本身卡死，重建后的 worker 可能同样卡死（日志会连续出现 timeout 行）→ 诊断路径：`journalctl --user -u voice-hold` + `dmesg`；恢复靠重载驱动/重启。与今天行为一致（今天也是每次听写都失败），但可见性更好（预热期就会暴露）。
-4. **预热被请求超时打断**：冷编译期间到达的听写若超出 `VOICE_INPUT_TRANSCRIBE_TIMEOUT`，会 SIGKILL 正在编译的 worker（缓存多半已写入，代价是一次重建）。与今天「那一次听写本身超时」等价。
+4. **预热被请求超时打断**：冷编译期间到达的听写若超出 `VOICE_INPUT_TRANSCRIBE_TIMEOUT`，**本次听写失败但不杀 worker**（保住进行中的编译，§4.3 情形 (b)）；只有等 ready 超过 `PREWARM_READY_TIMEOUT`(600s) 才判定启动失败并 kill，下一次听写重建。
 5. **孤儿窗口**：父进程在 worker 解码中被 `SIGKILL` 时，worker 会在该次解码结束后才自退（实测 ≤3.1s）。systemd 场景由 cgroup kill 覆盖。
 6. **手工启动路径**：`python3 voice_hold.py` 直接跑（非 systemd）时，Ctrl-C 依赖 `finally: shutdown()`；若被 `kill -9`，靠 D11 第①层。
 7. **前导代码第三份拷贝**（D14 的代价）：`transcribe_once.py` / `voice-ptt.py` / `transcribe_worker.py` 各有一份「依赖库路径 + 可行动报错」。本 issue 不动前两个；建议后续单独立 issue 抽取 `engine.prepare_process_env()`。
-8. **文档连带**：README（EN+ZH）里「每次听写仍付 ~1.4s 加载 / a resident transcription worker is tracked as #25」等句子必须更新，否则文档撒谎；配置表新增 `VOICE_INPUT_RESIDENT`；**Testing 节命令纳入三个新测试模块**；contrib unit 注释里的「#25 常驻后免每次加载」改为描述现状。**注意本机 unit 是手工副本（非 contrib 软链）**，真机验证项需按实际文件判断（§6「验收前置」）。
+8. **文档连带**：README（EN+ZH）里描述「每次听写额外付约 1.4 秒模型加载（#18 子进程架构）」以及「常驻转写 worker 由 #25 跟踪」的旧表述必须更新，否则文档撒谎；配置表新增 `VOICE_INPUT_RESIDENT`；**Testing 节命令纳入三个新测试模块**；contrib unit 注释需改为描述常驻 worker 现状。**注意本机 unit 是手工副本（非 contrib 软链）**，真机验证项需按实际文件判断（§6「验收前置」）。
 9. **cuda 引擎的库路径生效边界（沿用现状，不在本 issue 修）**：worker 与 `transcribe_once.py` 一样在**进程内**写 `os.environ["LD_LIBRARY_PATH"]`，而真正 dlopen 生效依赖**调用方进程启动时**的 `LD_LIBRARY_PATH`（shell wrapper / systemd）；`engine.child_env` 只对 npu 注入。因此 hold+cuda 的支持面与今天完全相同——本 issue 不改善也不恶化。
 
 ## 8. 改动文件清单
@@ -338,7 +338,7 @@ systemctl --user restart voice-hold && systemctl --user status voice-hold | head
 | `test_hold.py` | A9/A10（`_deliver` 双分支 + 构造契约 + release/耗时日志 + 预热接线） |
 | `bench/hold-latency.py`（新） | spawn vs 常驻计时对比，`--dry-run` |
 | `README.md` / `README.zh-CN.md` | NPU 节 + 配置表（`VOICE_INPUT_RESIDENT`）+ 已知限制/资源段落 + **Testing 套件命令纳入三个新测试模块** |
-| `contrib/voice-hold.service` | 注释更新（常驻后免每次加载；保留 timeout 说明） |
+| `contrib/voice-hold.service` | 注释更新（描述常驻 worker 现状与 `VOICE_INPUT_RESIDENT` 逃生开关；保留 timeout 说明） |
 
 ## 9. 待确认的决策点（⏸ design gate）
 
