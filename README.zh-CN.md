@@ -308,7 +308,7 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 ## 测试
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker -v
 ```
 
 测试仅用标准库，不依赖 GPU。

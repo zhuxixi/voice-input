@@ -465,7 +465,8 @@ class TestRecordingPath(unittest.TestCase):
         d._spawn_paste = mock.Mock(return_value=(0, False))  # #29 seam
         with mock.patch.object(voice_hold.subprocess, "check_output",
                                return_value="你好\n") as co:
-            d._deliver()
+            with contextlib.redirect_stdout(io.StringIO()):
+                d._deliver()
         argv = co.call_args.args[0]
         self.assertTrue(argv[1].endswith("transcribe_once.py"))
         self.assertEqual(argv[2], wav)              # A8: argv carries it
@@ -621,7 +622,8 @@ class TestDeliverBranches(unittest.TestCase):
              mock.patch.object(d.supervisor, "request", return_value=(None, "throttled")), \
              mock.patch.object(d, "_spawn_paste") as paste:
             d.wav_path = self._wav(tmp)
-            with contextlib.redirect_stderr(io.StringIO()) as err:
+            with contextlib.redirect_stderr(io.StringIO()) as err, \
+                 contextlib.redirect_stdout(io.StringIO()):
                 d._deliver()
         paste.assert_not_called()
         self.assertIn("throttled", err.getvalue())

@@ -370,7 +370,7 @@ The author's setup, for reference:
 ## Testing
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker -v
 ```
 
 The tests use only the standard library and don't touch the GPU.
