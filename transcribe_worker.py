@@ -44,8 +44,13 @@ def _preamble(log):
     import sysconfig
     import engine
     site = sysconfig.get_paths()["purelib"]
-    eng = engine.engine_name(dict(os.environ))          # ValueError -> caller exits 1
-    paths = engine.required_lib_paths(eng, site)
+    try:
+        eng = engine.engine_name(dict(os.environ))
+        paths = engine.required_lib_paths(eng, site)
+    except ValueError as e:
+        # invalid engine value: clean exit, no bare traceback (mirrors transcribe_once.py:47-53)
+        log(f"[voice-input] {e}")
+        return 1
     if eng == "npu" and not engine.has_library_paths(dict(os.environ), paths):
         log("[voice-input] NPU engine requires LD_LIBRARY_PATH to contain "
             f"{engine.NPU_LIB_DIR} at process start (ld.so reads it once).\n"

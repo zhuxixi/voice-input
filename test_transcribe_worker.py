@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 import engine
 import terms
@@ -52,6 +53,7 @@ class WorkerHarness(unittest.TestCase):
         self.parent_sock = parent
         self.child = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM,
                                    fileno=child.detach())
+        self.addCleanup(self.child.close)
         self.child_file = self.child.makefile("rwb")
         self.done = None
 
@@ -143,6 +145,18 @@ class TestWorkerLoop(WorkerHarness):
                 break
             import time; time.sleep(0.05)
         self.assertEqual(self.done, 3)
+
+
+class TestPreambleInvalidEngine(unittest.TestCase):
+    """Spec §4.4 (#25): invalid engine -> clean exit 1, one actionable log
+    line, no bare traceback (mirrors transcribe_once.py:47-53)."""
+
+    def test_invalid_engine_exits_clean(self):
+        logs = []
+        with mock.patch.dict(os.environ, {"VOICE_INPUT_ENGINE": "bogus"}):
+            rc = tw._preamble(logs.append)
+        self.assertEqual(rc, 1)
+        self.assertTrue(any("unsupported engine" in m for m in logs), logs)
 
 
 class TestArgv(unittest.TestCase):
