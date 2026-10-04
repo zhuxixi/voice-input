@@ -319,6 +319,7 @@ class HoldDaemon:
         工作线程(Zima CR round-3 发现 1),read_loop 继续消费事件——忙态期间
         的新按键由 transition 丢弃,不会被 evdev 缓冲成迟到的幽灵录音。"""
         rec, self.rec_proc = self.rec_proc, None
+        print("[voice-hold] released -> transcribing", flush=True)
         if rec is not None:
             # 与 voice-ptt.py 同款分支日志(CR 发现 1):kill 后仍不退出的卡死
             # 与普通失败必须可区分——静默吞掉会被 systemd Restart 放大成无诊断 crash-loop
@@ -367,28 +368,11 @@ class HoldDaemon:
                 print("[voice-hold] recording empty/too short (<1KB)",
                       file=sys.stderr)
                 return
-            # Same-class risk (#29): check_output waits for the stdout pipe
-            # EOF — if a future engine path ever daemonizes a child that
-            # inherits stdout, transcribe will false-timeout exactly like
-            # paste did. Today's faster-whisper / OpenVINO paths do not
-            # fork; keep it that way or drop the pipe here too.
             try:
-                text = subprocess.check_output(
-                    [VENV_PY, os.path.join(REPO_DIR, "transcribe_once.py"),
-                     wav],
-                    # npu 时注入 NPU 库目录(ld.so 只在子进程启动读一次);
-                    # 其他引擎原样拷贝,维持现状(#19)
-                    env=engine.child_env(self.env),
-                    stderr=sys.stderr, text=True,
-                    timeout=self._transcribe_timeout()).strip()
-            except subprocess.TimeoutExpired:
-                print("[voice-hold] transcribe timed out (hung child killed) — "
-                      "raise VOICE_INPUT_TRANSCRIBE_TIMEOUT if the model "
-                      "legitimately needs longer", file=sys.stderr)
-                text = ""
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                print(f"[voice-hold] transcribe failed: {e}", file=sys.stderr)
-                text = ""
+                if self.resident:
+                    text = self._transcribe_resident(wav)
+                else:
+                    text = self._transcribe_legacy(wav)
             finally:
                 if os.path.exists(wav):
                     os.unlink(wav)
@@ -398,6 +382,61 @@ class HoldDaemon:
             self._paste_and_report(text)
         finally:
             self.busy = False
+
+    def _transcribe_resident(self, wav):
+        """Resident branch: one round trip to the prewarmed worker."""
+        t0 = time.monotonic()
+        text, reason = self.supervisor.request(wav, self._transcribe_timeout())
+        if reason is not None:
+            print(f"[voice-hold] {self._describe_reason(reason)}", file=sys.stderr)
+            return ""
+        print(f"[voice-hold] transcribed in {time.monotonic() - t0:.2f}s (worker)",
+              flush=True)   # stdout, same channel as "recording ->" / "delivered:"
+        return text or ""
+
+    def _transcribe_legacy(self, wav):
+        """Legacy branch (#25 D8 escape hatch): spawn the CLI like before.
+
+        Same-class risk (#29): check_output waits for the stdout pipe EOF —
+        if a future engine path daemonizes a child that inherits stdout,
+        this false-timeouts exactly like paste did. Today's paths do not fork.
+        """
+        t0 = time.monotonic()
+        try:
+            text = subprocess.check_output(
+                [VENV_PY, os.path.join(REPO_DIR, "transcribe_once.py"), wav],
+                env=engine.child_env(self.env),
+                stderr=sys.stderr, text=True,
+                timeout=self._transcribe_timeout()).strip()
+        except subprocess.TimeoutExpired:
+            print("[voice-hold] transcribe timed out (hung child killed) — "
+                  "raise VOICE_INPUT_TRANSCRIBE_TIMEOUT if the model "
+                  "legitimately needs longer", file=sys.stderr)
+            return ""
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"[voice-hold] transcribe failed: {e}", file=sys.stderr)
+            return ""
+        print(f"[voice-hold] transcribed in {time.monotonic() - t0:.2f}s (spawn)",
+              flush=True)
+        return text
+
+    @staticmethod
+    def _describe_reason(reason: str) -> str:
+        """Reason -> actionable log line (spec §4.3 reason values)."""
+        if reason == "timeout":
+            return ("transcribe timed out — worker not ready in time, this dictation "
+                    "dropped (raise VOICE_INPUT_TRANSCRIBE_TIMEOUT if the model "
+                    "legitimately needs longer)")
+        if reason == "throttled":
+            return ("transcribe skipped: worker restart throttled after a recent "
+                    "failure — next dictation retries")
+        if reason == "worker-exit":
+            return ("transcribe worker unavailable (it exited) — next dictation "
+                    "will restart it; see its stderr above")
+        if reason == "protocol":
+            return ("transcribe worker protocol error — worker killed, next "
+                    "dictation will restart it")
+        return f"transcribe failed: {reason}"
 
     def _spawn_paste(self, text: str):
         """Paste delivery subprocess (#29): the ONLY place paste.py is spawned.

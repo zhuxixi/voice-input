@@ -410,9 +410,11 @@ class TestRecordingPath(unittest.TestCase):
         self._tmp = tempfile.mkdtemp(prefix="vh-wav-test-")
         self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
 
-    def _daemon(self):
-        d = voice_hold.HoldDaemon(env={"TMPDIR": self._tmp,
-                                       "VOICE_INPUT_ENGINE": "cpu"})
+    def _daemon(self, resident=True):
+        env = {"TMPDIR": self._tmp, "VOICE_INPUT_ENGINE": "cpu"}
+        if not resident:  # #25 D8: exercise the legacy CLI branch
+            env["VOICE_INPUT_RESIDENT"] = "0"
+        d = voice_hold.HoldDaemon(env=env)
         d.overlay = mock.Mock()   # never touch GTK from tests
         d._media_pause = None     # never touch D-Bus from tests
         return d
@@ -453,9 +455,9 @@ class TestRecordingPath(unittest.TestCase):
                 d.start_recording()
         self.assertFalse(os.path.exists(d.wav_path))
 
-    # A8
+    # A8 (legacy escape hatch, #25 ruling): resident=0 exercises the CLI spawn
     def test_deliver_transcribes_instance_path_and_cleans_up(self):
-        d = self._daemon()
+        d = self._daemon(resident=False)
         wav = voice_hold.new_recording_path(self._tmp)
         with open(wav, "wb") as f:
             f.write(b"\0" * 2048)   # pass the <1KB guard without arecord
@@ -580,6 +582,85 @@ class TestSupervisorWiring(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     d.run()
         self.assertEqual(Sup.return_value.shutdown.call_count, 1)
+
+
+class TestDeliverBranches(unittest.TestCase):
+    """A9/A10 + D13 (#25): resident vs legacy transcribe, and the timing log lines."""
+
+    def _daemon(self, env=None):
+        with mock.patch.object(voice_hold, "WorkerSupervisor"):
+            d = voice_hold.HoldDaemon(env or {"VOICE_INPUT_ENGINE": "cpu"})
+        return d
+
+    def _wav(self, tmpdir):
+        path = os.path.join(tmpdir, "probe.wav")
+        with open(path, "wb") as fh:
+            fh.write(b"0" * 2000)
+        return path
+
+    def test_resident_success_pastes_and_logs_duration(self):
+        d = self._daemon()
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(d.supervisor, "request", return_value=("你好", None)) as req, \
+             mock.patch.object(d, "_spawn_paste") as paste:
+            d.wav_path = self._wav(tmp)
+            paste.return_value = (0, False)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                d._deliver()
+        req.assert_called_once()
+        self.assertEqual(req.call_args[0][0], d.wav_path)
+        self.assertEqual(req.call_args[0][1], d._transcribe_timeout())
+        self.assertEqual(paste.call_args[0][0], "你好")
+        self.assertIn("(worker)", out.getvalue())
+        self.assertFalse(os.path.exists(d.wav_path))
+
+    def test_resident_error_does_not_paste_and_resets_busy(self):
+        d = self._daemon()
+        d.busy = True
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(d.supervisor, "request", return_value=(None, "throttled")), \
+             mock.patch.object(d, "_spawn_paste") as paste:
+            d.wav_path = self._wav(tmp)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                d._deliver()
+        paste.assert_not_called()
+        self.assertIn("throttled", err.getvalue())
+        self.assertFalse(d.busy)
+
+    def test_deliver_empty_text_does_not_paste(self):
+        d = self._daemon()
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(d.supervisor, "request", return_value=("", None)), \
+             mock.patch.object(d, "_spawn_paste") as paste:
+            d.wav_path = self._wav(tmp)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                d._deliver()
+        paste.assert_not_called()
+        self.assertIn("no speech", out.getvalue())   # "no speech recognized" goes to stdout
+
+    def test_legacy_branch_uses_cli_and_logs_spawn(self):
+        d = self._daemon({"VOICE_INPUT_ENGINE": "cpu", "VOICE_INPUT_RESIDENT": "0"})
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(d.supervisor, "request") as req, \
+             mock.patch.object(voice_hold.subprocess, "check_output",
+                               return_value="你好\n") as co, \
+             mock.patch.object(d, "_spawn_paste") as paste:
+            d.wav_path = self._wav(tmp)
+            paste.return_value = (0, False)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                d._deliver()
+        req.assert_not_called()
+        argv = co.call_args[0][0]
+        self.assertEqual(argv[1], os.path.join(voice_hold.REPO_DIR, "transcribe_once.py"))
+        self.assertIn("(spawn)", out.getvalue())
+
+    def test_stop_recording_logs_release_marker(self):
+        d = self._daemon()
+        d.recording = True
+        with mock.patch.object(voice_hold.threading, "Thread"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            d.stop_recording()
+        self.assertIn("released -> transcribing", out.getvalue())
 
 
 if __name__ == "__main__":
