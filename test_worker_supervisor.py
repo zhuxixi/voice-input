@@ -125,3 +125,47 @@ class TestResidentEnabled(unittest.TestCase):
         for value in ("1", "false", "no", "", " 0", "00"):
             with self.subTest(value=value):
                 self.assertTrue(ws.resident_enabled({ws.ENV_RESIDENT: value}))
+
+
+class TestSpawnAndRequest(SupervisorTestCase):
+    """A3 (#25): happy path — ready handshake, request/response, spawn contract."""
+
+    def test_request_returns_text_after_ready_handshake(self):
+        sup = self.make_supervisor()
+        text, err = sup.request("/tmp/x.wav", timeout=10.0)
+        self.assertEqual((text, err), ("stub-text", None))
+        self.assertTrue(sup.ready)
+
+    def test_ready_line_payload_is_parsed(self):
+        sup = self.make_supervisor()
+        self.assertEqual(sup.request("/tmp/x.wav", timeout=10.0)[0], "stub-text")
+        startup = sup._startup
+        self.assertEqual(startup.error, None)
+        self.assertGreater(startup.pid, 0)
+        self.assertAlmostEqual(startup.load_s, 0.01, places=3)
+
+    def test_spawn_receives_protocol_fd_and_env_verbatim(self):
+        sup = self.make_supervisor()
+        seen = {}
+
+        def fake_spawn(command, env, fd):
+            seen["command"] = list(command)
+            seen["env_is_verbatim"] = env == self.env
+            seen["fd_arg"] = ["--protocol-fd", str(fd)]
+            return subprocess.Popen(
+                list(command) + ["--protocol-fd", str(fd)], env=env,
+                pass_fds=(fd,), stdin=subprocess.DEVNULL)
+
+        sup._spawn_fn = fake_spawn
+        self.assertEqual(sup.request("/tmp/x.wav", timeout=10.0)[0], "stub-text")
+        self.assertEqual(seen["fd_arg"][0], "--protocol-fd")
+        self.assertTrue(seen["fd_arg"][1].isdigit())
+        self.assertTrue(seen["env_is_verbatim"])
+        self.assertEqual(seen["command"][1], self.stub_path)
+
+    def test_second_request_reuses_the_same_worker(self):
+        sup = self.make_supervisor()
+        self.assertEqual(sup.request("/tmp/a.wav", timeout=10.0)[0], "stub-text")
+        pid = sup._startup.proc.pid
+        self.assertEqual(sup.request("/tmp/b.wav", timeout=10.0)[0], "stub-text")
+        self.assertEqual(sup._startup.proc.pid, pid)
