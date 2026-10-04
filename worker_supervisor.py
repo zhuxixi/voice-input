@@ -86,12 +86,18 @@ class WorkerSupervisor:
             self._last_error = "throttled"
             return None
         self._last_attempt = now
-        parent, child = socket.socketpair()
         try:
+            parent, child = socket.socketpair()
             proc = self._spawn_fn(self.command, self.env, child.fileno())
         except OSError as e:
-            child.close()
-            parent.close()
+            try:
+                child.close()
+            except (OSError, NameError, UnboundLocalError):
+                pass
+            try:
+                parent.close()
+            except (OSError, NameError, UnboundLocalError):
+                pass
             self._last_error = "worker-exit"
             self._log(f"[voice-hold] worker spawn failed: {e}")
             return None
@@ -208,7 +214,8 @@ class WorkerSupervisor:
         try:
             remaining = deadline - self._clock()
             if remaining <= 0:
-                raise socket.timeout()
+                # budget consumed by the ready wait: no kill (§4.3 (b))
+                return None, "timeout"
             startup.sock.settimeout(remaining)
             startup.conn.write(encode_request(rid, wav))
             startup.conn.flush()

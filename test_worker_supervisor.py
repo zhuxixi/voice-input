@@ -169,3 +169,99 @@ class TestSpawnAndRequest(SupervisorTestCase):
         pid = sup._startup.proc.pid
         self.assertEqual(sup.request("/tmp/b.wav", timeout=10.0)[0], "stub-text")
         self.assertEqual(sup._startup.proc.pid, pid)
+
+
+def live_worker(sup):
+    """Test helper: the current worker Popen, or None (kept out of the module)."""
+    return None if sup._startup is None else sup._startup.proc
+
+
+class TestFailurePaths(SupervisorTestCase):
+    """A4/A5 (#25): hung request, dead startup, protocol junk, and respawn.
+
+    Sockets always time out in real time (settimeout ignores the fake clock), so
+    a frozen FakeClock keeps the throttle deterministic while the 0.4s budget
+    still elapses for real.
+    """
+
+    mode = "never"
+
+    def test_hung_request_times_out_and_kills_worker(self):
+        sup = self.make_supervisor()
+        proc = None
+        t0 = time.monotonic()
+        text, reason = sup.request("/tmp/x.wav", timeout=0.4)
+        self.assertEqual((text, reason), (None, "timeout"))
+        self.assertLess(time.monotonic() - t0, 0.9)
+        self.assertIsNone(live_worker(sup))          # killed and forgotten
+        self.assertTrue(any("worker read timed out" in m for m in self.logs))
+
+    def test_next_request_after_timeout_respawns(self):
+        sup = self.make_supervisor()
+        self.assertEqual(sup.request("/tmp/x.wav", timeout=0.4)[1], "timeout")
+        self.clock.advance(ws.WORKER_RESTART_MIN_INTERVAL + 0.01)
+        with mock.patch.object(sup, "_spawn_fn", wraps=sup._spawn_fn) as spy:
+            self.assertEqual(sup.request("/tmp/y.wav", timeout=0.4)[1], "timeout")
+            self.assertEqual(spy.call_count, 1)      # exactly one fresh spawn
+
+    def test_budget_exhausted_before_send_fails_without_kill(self):
+        """Controller addendum (#25 §4.3 (b)): a ready wait that consumed the
+        whole budget must fail the request without killing the worker — no
+        request was ever sent. The clock jumps between the deadline captured in
+        request() and the pre-send budget check, mimicking an over-long ready
+        wait on an already-live worker."""
+        self.env["STUB_MODE"] = "ok"
+        sup = self.make_supervisor()
+        self.assertEqual(sup.request("/tmp/first.wav", timeout=10.0)[0], "stub-text")
+        proc = live_worker(sup)
+        # request() reads the clock twice for an already-ready worker (deadline,
+        # then the pre-send check): report the second read far past the deadline.
+        base = self.clock.now
+        reads = []
+
+        def jumping_clock():
+            reads.append(base)
+            return base if len(reads) == 1 else base + 10_000.0
+
+        sup._clock = jumping_clock
+        with mock.patch.object(sup, "_fail") as fail:
+            self.assertEqual(sup.request("/tmp/second.wav", timeout=1.0),
+                             (None, "timeout"))
+        fail.assert_not_called()
+        self.assertIsNone(proc.poll())
+
+
+class TestStartupFailure(SupervisorTestCase):
+    """A5 (#25): a worker that dies before ready / speaks junk must fail cleanly."""
+
+    def test_worker_exit_before_ready(self):
+        sup = self.make_supervisor()
+        sup.env = dict(self.env, STUB_MODE="die")
+        text, reason = sup.request("/tmp/x.wav", timeout=5.0)
+        self.assertEqual((text, reason), (None, "worker-exit"))
+        self.assertTrue(any("exited before ready" in m for m in self.logs))
+        self.assertFalse(sup.ready)
+
+    def test_bad_line_kills_worker_and_reports_protocol(self):
+        self.env["STUB_MODE"] = "bad-line"
+        sup = self.make_supervisor()
+        self.assertEqual(sup.request("/tmp/x.wav", timeout=5.0)[1], "protocol")
+        self.assertFalse(sup.ready)
+
+    def test_single_request_spawns_at_most_once(self):
+        self.env["STUB_MODE"] = "die"
+        sup = self.make_supervisor()
+        with mock.patch.object(sup, "_spawn_fn", wraps=sup._spawn_fn) as spy:
+            sup.request("/tmp/x.wav", timeout=5.0)
+            self.assertLessEqual(spy.call_count, 1)
+
+    def test_default_spawn_wires_fd_and_inherits_stdio(self):
+        """A5/D10 (#25): worker stdout/stderr must reach the journal — never PIPE."""
+        with mock.patch.object(ws.subprocess, "Popen") as popen:
+            ws.WorkerSupervisor._default_spawn(["py", "worker.py"], {"A": "1"}, 7)
+        args, kwargs = popen.call_args
+        self.assertEqual(args[0], ["py", "worker.py", "--protocol-fd", "7"])
+        self.assertEqual(kwargs["pass_fds"], (7,))
+        self.assertEqual(kwargs["stdin"], ws.subprocess.DEVNULL)
+        self.assertNotIn("stdout", kwargs)
+        self.assertNotIn("stderr", kwargs)
