@@ -64,6 +64,7 @@ class WorkerSupervisor:
         self._last_attempt = None
         self._last_error = None
         self._rid = 0
+        self._shutdown_done = False
 
     # -- spawning ---------------------------------------------------------
     @staticmethod
@@ -254,9 +255,32 @@ class WorkerSupervisor:
             self._kill_locked()
 
     def shutdown(self) -> None:
-        """kill worker + close channel (Task 6 makes this fully idempotent)."""
+        """kill worker + close channel; idempotent (spec §4.3, pinned by A15)."""
         with self._lock:
+            if self._shutdown_done:
+                return
+            self._shutdown_done = True
             self._kill_locked()
+
+    def prewarm(self) -> bool:
+        """Start the worker now (startup thread entry). Never raises.
+
+        Success logs `worker ready in X.XXs (pid N, engine=…)` (pinned by A15);
+        failure logs an actionable line and leaves the supervisor not-ready so the
+        next request retries under the throttle (spec §4.3).
+        """
+        deadline = self._clock() + PREWARM_READY_TIMEOUT
+        ok, reason = self._ensure_ready(deadline)
+        if not ok:
+            self._log(f"[voice-hold] worker prewarm failed ({reason}) — next dictation "
+                      "will retry; see the worker's own stderr above")
+            return False
+        startup = self._startup
+        load_s = startup.load_s if startup and startup.load_s is not None else 0.0
+        pid = startup.pid if startup else "?"
+        self._log(f"[voice-hold] worker ready in {load_s:.2f}s (pid {pid}, "
+                  f"engine={self.env.get('VOICE_INPUT_ENGINE', 'cuda')})")
+        return True
 
     def _kill_locked(self):
         """Caller holds self._lock. Never blocks longer than KILL_WAIT_TIMEOUT."""

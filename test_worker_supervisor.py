@@ -346,7 +346,7 @@ class TestStartupCoordination(SupervisorTestCase):
         results = []
 
         def owner_handshake():            # prewarm's shape: handshake, no request
-            results.append(sup._ensure_ready(sup._clock() + 8.0))
+            results.append((sup.prewarm(), None))
 
         starter = threading.Thread(target=owner_handshake)
         starter.start()
@@ -354,8 +354,8 @@ class TestStartupCoordination(SupervisorTestCase):
         results.append(sup.request("/tmp/joiner.wav", timeout=5.0))
         starter.join(timeout=10.0)
 
-        self.assertEqual(results[0], (True, None))
-        self.assertEqual(results[1], ("stub-text", None))
+        self.assertIn((True, None), results)
+        self.assertIn(("stub-text", None), results)
         self.assertTrue(sup.ready)
         self.assertIsNone(live_worker(sup).poll())
 
@@ -372,3 +372,36 @@ class TestKillSemantics(SupervisorTestCase):
         self.clock.advance(ws.WORKER_RESTART_MIN_INTERVAL + 0.01)
         sup.env = dict(self.env, STUB_MODE="ok")
         self.assertEqual(sup.request("/tmp/b.wav", timeout=5.0), ("stub-text", None))
+
+
+class TestPrewarmAndShutdown(SupervisorTestCase):
+    """A15 (#25): prewarm log contract, failure return, idempotent shutdown."""
+
+    def test_prewarm_success_logs_the_pinned_format(self):
+        sup = self.make_supervisor()
+        self.assertTrue(sup.prewarm())
+        self.assertTrue(any("worker ready in " in m and "(pid " in m for m in self.logs),
+                        self.logs)
+
+    def test_prewarm_failure_returns_false_and_logs(self):
+        self.env["STUB_MODE"] = "die"
+        sup = self.make_supervisor()
+        self.assertFalse(sup.prewarm())
+        self.assertTrue(any("exited before ready" in m for m in self.logs), self.logs)
+
+    def test_request_retries_after_prewarm_failure(self):
+        self.env["STUB_MODE"] = "die"
+        sup = self.make_supervisor()
+        self.assertFalse(sup.prewarm())
+        self.clock.advance(ws.WORKER_RESTART_MIN_INTERVAL + 0.01)
+        sup.env = dict(self.env, STUB_MODE="ok")
+        self.assertEqual(sup.request("/tmp/x.wav", timeout=5.0), ("stub-text", None))
+
+    def test_shutdown_is_idempotent_and_kills_the_worker(self):
+        sup = self.make_supervisor()
+        self.assertTrue(sup.prewarm())
+        proc = live_worker(sup)
+        sup.shutdown()
+        sup.shutdown()
+        self.assertIsNotNone(proc)
+        self.assertIsNotNone(proc.poll())
