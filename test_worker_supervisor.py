@@ -4,6 +4,7 @@ The stub is a real child process speaking the real protocol — no fake sockets,
 these tests exercise the production spawn/handshake/kill path without any model.
 """
 
+import errno
 import os
 import shutil
 import socket
@@ -247,6 +248,7 @@ class TestStartupFailure(SupervisorTestCase):
         sup = self.make_supervisor()
         self.assertEqual(sup.request("/tmp/x.wav", timeout=5.0)[1], "protocol")
         self.assertFalse(sup.ready)
+        self.assertTrue(any("protocol error" in m for m in self.logs), self.logs)
 
     def test_single_request_spawns_at_most_once(self):
         self.env["STUB_MODE"] = "die"
@@ -254,6 +256,31 @@ class TestStartupFailure(SupervisorTestCase):
         with mock.patch.object(sup, "_spawn_fn", wraps=sup._spawn_fn) as spy:
             sup.request("/tmp/x.wav", timeout=5.0)
             self.assertLessEqual(spy.call_count, 1)
+
+    def test_makefile_failure_after_spawn_contains_and_reaps(self):
+        """A4/A5 (#25): a failure between Popen and channel creation (e.g.
+        makefile EMFILE) must stay inside the (None, reason) contract and reap
+        the already-spawned worker instead of leaking it."""
+        parent = mock.Mock()
+        parent.makefile.side_effect = OSError(errno.EMFILE, "too many open files")
+        child = mock.Mock()
+        spawned = []
+
+        def spawn(command, env, fd):
+            proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdin=subprocess.DEVNULL)
+            spawned.append(proc)
+            return proc
+
+        sup = self.make_supervisor()
+        sup._spawn_fn = spawn
+        with mock.patch.object(ws.socket, "socketpair", return_value=(parent, child)):
+            self.assertEqual(sup.request("/tmp/x.wav", timeout=1.0),
+                             (None, "worker-exit"))
+        self.assertIsNone(sup._startup)
+        self.assertIsNotNone(spawned[0].poll())   # killed + reaped, not orphaned
+        parent.close.assert_called()
 
     def test_default_spawn_wires_fd_and_inherits_stdio(self):
         """A5/D10 (#25): worker stdout/stderr must reach the journal — never PIPE."""
