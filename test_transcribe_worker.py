@@ -170,3 +170,38 @@ class TestArgv(unittest.TestCase):
     def test_non_int_fd_rejected(self):
         with self.assertRaises(SystemExit):
             tw.parse_args(["--protocol-fd", "abc"])
+
+
+DRIVER = """
+import os, socket, sys
+sys.path.insert(0, {repo!r})
+import transcribe_worker as tw
+
+class FakeModel:
+    def transcribe(self, wav, language="zh", initial_prompt=None, **kw):
+        return [type("S", (), {{"text": "driver-text"}})()], object()
+
+fd = int(sys.argv[sys.argv.index("--protocol-fd") + 1])
+conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM, fileno=fd)
+sys.exit(tw.worker_main(conn.makefile("rwb"), model_factory=FakeModel,
+                        log=lambda m: print(m, file=sys.stderr)))
+"""
+
+
+class TestRealProcessEof(unittest.TestCase):
+    def test_worker_exits_on_parent_socket_close(self):
+        import subprocess, textwrap
+        tmp = tempfile.mkdtemp(prefix="vh-eof-test-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        driver = os.path.join(tmp, "driver.py")
+        with open(driver, "w", encoding="utf-8") as fh:
+            fh.write(DRIVER.format(repo=REPO))
+        parent, child = socket.socketpair()
+        proc = subprocess.Popen(
+            [sys.executable, driver, "--protocol-fd", str(child.fileno())],
+            pass_fds=(child.fileno(),), stdin=subprocess.DEVNULL)
+        child.close()
+        with parent.makefile("rwb") as f:
+            self.assertEqual(wp.parse_line(f.readline())["event"], "ready")
+        parent.close()                          # simulate the daemon vanishing
+        self.assertEqual(proc.wait(timeout=5.0), 0)
