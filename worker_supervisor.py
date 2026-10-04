@@ -129,18 +129,19 @@ class WorkerSupervisor:
                 if self._ready and self._startup is not None:
                     return True, None
                 startup = self._startup
-                if startup is None:
+                if startup is None or startup.error is not None:
+                    if startup is not None and startup.error is not None:
+                        self._startup = None
                     startup = self._spawn_locked()
                     if startup is None:
                         return False, self._last_error or "worker-exit"
                     owner = True
-                elif startup.error is not None:
-                    self._startup = None
-                    continue
-                elif startup.reading:
-                    owner = False
                 else:
-                    owner = True
+                    # Atomic owner/joiner decision: a live, unresolved startup is
+                    # owned by exactly the thread that marked it `reading`. Every
+                    # other caller joins by waiting on `ready` — never a second
+                    # reader on the same socket (spec D15).
+                    owner = startup.reading is False and not startup.ready.is_set()
                 if owner:
                     startup.reading = True
 

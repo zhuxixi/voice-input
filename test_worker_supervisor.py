@@ -292,3 +292,83 @@ class TestStartupFailure(SupervisorTestCase):
         self.assertEqual(kwargs["stdin"], ws.subprocess.DEVNULL)
         self.assertNotIn("stdout", kwargs)
         self.assertNotIn("stderr", kwargs)
+
+
+class TestThrottle(SupervisorTestCase):
+    """A6 (#25): at most one spawn per interval; the blocked call says so."""
+
+    def test_throttle_blocks_second_spawn_within_interval(self):
+        self.env["STUB_MODE"] = "die"
+        sup = self.make_supervisor()
+        with mock.patch.object(sup, "_spawn_fn", wraps=sup._spawn_fn) as spy:
+            self.assertEqual(sup.request("/tmp/a.wav", timeout=5.0)[1], "worker-exit")
+            self.assertEqual(sup.request("/tmp/b.wav", timeout=5.0)[1], "throttled")
+            self.assertEqual(spy.call_count, 1)
+
+    def test_spawn_allowed_again_after_interval(self):
+        self.env["STUB_MODE"] = "die"
+        sup = self.make_supervisor()
+        with mock.patch.object(sup, "_spawn_fn", wraps=sup._spawn_fn) as spy:
+            sup.request("/tmp/a.wav", timeout=5.0)
+            self.clock.advance(ws.WORKER_RESTART_MIN_INTERVAL + 0.01)
+            sup.request("/tmp/b.wav", timeout=5.0)
+            self.assertEqual(spy.call_count, 2)
+
+
+class TestStartupCoordination(SupervisorTestCase):
+    """A4/D15 (#25): a request that joins an in-flight slow start must not kill it."""
+
+    mode = "slow-ready"
+
+    def test_joiner_times_out_without_killing_the_worker(self):
+        self.env["STUB_DELAY"] = "3"
+        sup = self.make_supervisor()
+        starter = threading.Thread(
+            target=lambda: sup.request("/tmp/owner.wav", timeout=8.0))
+        starter.start()
+        time.sleep(0.3)                       # let the owner thread enter the handshake
+        text, reason = sup.request("/tmp/joiner.wav", timeout=0.2)
+        self.assertEqual((text, reason), (None, "timeout"))
+        proc = live_worker(sup)
+        self.assertIsNotNone(proc)            # worker still alive: compile protected
+        self.assertIsNone(proc.poll())
+        starter.join(timeout=10.0)
+        self.assertTrue(sup.ready)            # owner completed the handshake
+
+    def test_joiner_request_during_slow_start_succeeds_after_ready(self):
+        """Deterministic joiner-success pin (#25 D15): a request arriving while
+        a slow start is in flight waits on the shared ready event and is then
+        served by the ready worker. Concurrent in-flight requests are out of
+        contract (spec NG7): one handshake owner + one joiner is the
+        production shape (prewarm + dictation)."""
+        self.env["STUB_DELAY"] = "1"
+        sup = self.make_supervisor()
+        results = []
+
+        def owner_handshake():            # prewarm's shape: handshake, no request
+            results.append(sup._ensure_ready(sup._clock() + 8.0))
+
+        starter = threading.Thread(target=owner_handshake)
+        starter.start()
+        time.sleep(0.2)                   # owner is mid-handshake now
+        results.append(sup.request("/tmp/joiner.wav", timeout=5.0))
+        starter.join(timeout=10.0)
+
+        self.assertEqual(results[0], (True, None))
+        self.assertEqual(results[1], ("stub-text", None))
+        self.assertTrue(sup.ready)
+        self.assertIsNone(live_worker(sup).poll())
+
+
+class TestKillSemantics(SupervisorTestCase):
+    """Review Focus 1 (#25): a killed worker leaves no stale channel behind."""
+
+    mode = "never"
+
+    def test_kill_closes_channel_and_next_request_uses_new_worker(self):
+        sup = self.make_supervisor()
+        self.assertEqual(sup.request("/tmp/a.wav", timeout=0.3)[1], "timeout")
+        self.assertIsNone(live_worker(sup))
+        self.clock.advance(ws.WORKER_RESTART_MIN_INTERVAL + 0.01)
+        sup.env = dict(self.env, STUB_MODE="ok")
+        self.assertEqual(sup.request("/tmp/b.wav", timeout=5.0), ("stub-text", None))
