@@ -514,6 +514,13 @@ class HoldDaemon:
         for f in ("transcribe_once.py", "paste.py"):
             if not os.path.isfile(os.path.join(REPO_DIR, f)):
                 missing.append(f"{f} missing under {REPO_DIR} — repo checkout broken?")
+        # 常驻 worker 是默认路径但只在 spawn 时才被打开——预检挡住半部署
+        # checkout（缺文件时启动即报，而不是每次听写 spawn 失败）（CR r1 #2）
+        if self.resident and not os.path.isfile(
+                os.path.join(REPO_DIR, "transcribe_worker.py")):
+            missing.append(f"transcribe_worker.py missing under {REPO_DIR} — "
+                           "resident worker unavailable (VOICE_INPUT_RESIDENT=0 "
+                           "falls back to per-dictation spawn)")
         return missing
 
     def run(self) -> int:

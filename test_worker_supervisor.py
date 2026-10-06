@@ -397,6 +397,19 @@ class TestPrewarmAndShutdown(SupervisorTestCase):
         sup.env = dict(self.env, STUB_MODE="ok")
         self.assertEqual(sup.request("/tmp/x.wav", timeout=5.0), ("stub-text", None))
 
+    def test_request_after_shutdown_degrades_without_respawn(self):
+        """CR r1 #1 (#25): a straggler request racing teardown must degrade to
+        ("worker-exit") — never crash with AttributeError, never respawn a
+        worker while the daemon is exiting."""
+        sup = self.make_supervisor()
+        self.assertEqual(sup.request("/tmp/a.wav", timeout=10.0)[0], "stub-text")
+        sup.shutdown()
+        with mock.patch.object(sup, "_spawn_fn", wraps=sup._spawn_fn) as spy:
+            self.assertEqual(sup.request("/tmp/b.wav", timeout=10.0),
+                             (None, "worker-exit"))
+            spy.assert_not_called()
+        self.assertIsNone(live_worker(sup))
+
     def test_shutdown_is_idempotent_and_kills_the_worker(self):
         sup = self.make_supervisor()
         self.assertTrue(sup.prewarm())

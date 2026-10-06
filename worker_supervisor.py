@@ -127,6 +127,10 @@ class WorkerSupervisor:
         """
         while True:
             with self._lock:
+                if self._shutdown_done:
+                    # teardown already ran: never respawn during exit — a
+                    # straggler request degrades cleanly instead (CR r1 #1)
+                    return False, "worker-exit"
                 if self._ready and self._startup is not None:
                     return True, None
                 startup = self._startup
@@ -218,6 +222,10 @@ class WorkerSupervisor:
             startup = self._startup
             self._rid += 1
             rid = self._rid
+        if startup is None:
+            # shutdown() raced us between _ensure_ready and this read
+            # (run()'s finally on the exit path): degrade, never crash (CR r1 #1)
+            return None, "worker-exit"
         try:
             remaining = deadline - self._clock()
             if remaining <= 0:

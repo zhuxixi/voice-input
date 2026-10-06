@@ -545,6 +545,26 @@ class TestDuplicateInstance(unittest.TestCase):
         self.assertEqual(d._lock_fd, fd)   # held, not closed
 
 
+class TestPreflightWorkerScript(unittest.TestCase):
+    """CR r1 #2 (#25): the resident worker script is checked at startup —
+    a half-deployed checkout fails preflight, not the first dictation."""
+
+    def test_missing_worker_script_flagged_when_resident(self):
+        with mock.patch.object(voice_hold, "WorkerSupervisor"):
+            d = voice_hold.HoldDaemon({"VOICE_INPUT_ENGINE": "cpu"})
+        with mock.patch.object(voice_hold.os.path, "isfile", return_value=False):
+            missing = " ".join(d._preflight())
+        self.assertIn("transcribe_worker.py missing", missing)
+
+    def test_legacy_mode_does_not_require_worker_script(self):
+        with mock.patch.object(voice_hold, "WorkerSupervisor"):
+            d = voice_hold.HoldDaemon({"VOICE_INPUT_ENGINE": "cpu",
+                                       "VOICE_INPUT_RESIDENT": "0"})
+        with mock.patch.object(voice_hold.os.path, "isfile", return_value=False):
+            missing = " ".join(d._preflight())
+        self.assertNotIn("transcribe_worker.py missing", missing)
+
+
 class TestSupervisorWiring(unittest.TestCase):
     """A9 (#25): construction contract, background prewarm, finally-shutdown."""
 
