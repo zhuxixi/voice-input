@@ -26,6 +26,7 @@ import threading
 import time
 
 import engine  # 顶层纯标准库(#16 同款);npu 子进程 env 注入的唯一来源(#19)
+from worker_supervisor import WorkerSupervisor, resident_enabled  # #25 驻留转写
 
 REPO_DIR = os.path.dirname(os.path.realpath(__file__))
 VENV_PY = os.path.join(REPO_DIR, "venv", "bin", "python3")
@@ -272,6 +273,14 @@ class HoldDaemon:
         self.rec_proc = None
         self.wav_path = None  # per-recording path, set by start_recording (#28)
         self._lock_fd = None  # singleton flock held for process lifetime (#28)
+        # #25: resident worker supervisor (stdlib-only import keeps the
+        # purity contract); constructed before any process work so run()
+        # can shut it down on every exit path.
+        self.resident = resident_enabled(self.env)
+        self.supervisor = WorkerSupervisor(
+            [VENV_PY, os.path.join(REPO_DIR, "transcribe_worker.py")],
+            engine.child_env(self.env),
+        )
         self.overlay = _Overlay()
         self._paused = []
         self._media_pause = None
@@ -310,6 +319,7 @@ class HoldDaemon:
         工作线程(Zima CR round-3 发现 1),read_loop 继续消费事件——忙态期间
         的新按键由 transition 丢弃,不会被 evdev 缓冲成迟到的幽灵录音。"""
         rec, self.rec_proc = self.rec_proc, None
+        print("[voice-hold] released -> transcribing", flush=True)
         if rec is not None:
             # 与 voice-ptt.py 同款分支日志(CR 发现 1):kill 后仍不退出的卡死
             # 与普通失败必须可区分——静默吞掉会被 systemd Restart 放大成无诊断 crash-loop
@@ -358,28 +368,11 @@ class HoldDaemon:
                 print("[voice-hold] recording empty/too short (<1KB)",
                       file=sys.stderr)
                 return
-            # Same-class risk (#29): check_output waits for the stdout pipe
-            # EOF — if a future engine path ever daemonizes a child that
-            # inherits stdout, transcribe will false-timeout exactly like
-            # paste did. Today's faster-whisper / OpenVINO paths do not
-            # fork; keep it that way or drop the pipe here too.
             try:
-                text = subprocess.check_output(
-                    [VENV_PY, os.path.join(REPO_DIR, "transcribe_once.py"),
-                     wav],
-                    # npu 时注入 NPU 库目录(ld.so 只在子进程启动读一次);
-                    # 其他引擎原样拷贝,维持现状(#19)
-                    env=engine.child_env(self.env),
-                    stderr=sys.stderr, text=True,
-                    timeout=self._transcribe_timeout()).strip()
-            except subprocess.TimeoutExpired:
-                print("[voice-hold] transcribe timed out (hung child killed) — "
-                      "raise VOICE_INPUT_TRANSCRIBE_TIMEOUT if the model "
-                      "legitimately needs longer", file=sys.stderr)
-                text = ""
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                print(f"[voice-hold] transcribe failed: {e}", file=sys.stderr)
-                text = ""
+                if self.resident:
+                    text = self._transcribe_resident(wav)
+                else:
+                    text = self._transcribe_legacy(wav)
             finally:
                 if os.path.exists(wav):
                     os.unlink(wav)
@@ -389,6 +382,61 @@ class HoldDaemon:
             self._paste_and_report(text)
         finally:
             self.busy = False
+
+    def _transcribe_resident(self, wav):
+        """Resident branch: one round trip to the prewarmed worker."""
+        t0 = time.monotonic()
+        text, reason = self.supervisor.request(wav, self._transcribe_timeout())
+        if reason is not None:
+            print(f"[voice-hold] {self._describe_reason(reason)}", file=sys.stderr)
+            return ""
+        print(f"[voice-hold] transcribed in {time.monotonic() - t0:.2f}s (worker)",
+              flush=True)   # stdout, same channel as "recording ->" / "delivered:"
+        return text or ""
+
+    def _transcribe_legacy(self, wav):
+        """Legacy branch (#25 D8 escape hatch): spawn the CLI like before.
+
+        Same-class risk (#29): check_output waits for the stdout pipe EOF —
+        if a future engine path daemonizes a child that inherits stdout,
+        this false-timeouts exactly like paste did. Today's paths do not fork.
+        """
+        t0 = time.monotonic()
+        try:
+            text = subprocess.check_output(
+                [VENV_PY, os.path.join(REPO_DIR, "transcribe_once.py"), wav],
+                env=engine.child_env(self.env),
+                stderr=sys.stderr, text=True,
+                timeout=self._transcribe_timeout()).strip()
+        except subprocess.TimeoutExpired:
+            print("[voice-hold] transcribe timed out (hung child killed) — "
+                  "raise VOICE_INPUT_TRANSCRIBE_TIMEOUT if the model "
+                  "legitimately needs longer", file=sys.stderr)
+            return ""
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"[voice-hold] transcribe failed: {e}", file=sys.stderr)
+            return ""
+        print(f"[voice-hold] transcribed in {time.monotonic() - t0:.2f}s (spawn)",
+              flush=True)
+        return text
+
+    @staticmethod
+    def _describe_reason(reason: str) -> str:
+        """Reason -> actionable log line (spec §4.3 reason values)."""
+        if reason == "timeout":
+            return ("transcribe timed out — worker not ready in time, this dictation "
+                    "dropped (raise VOICE_INPUT_TRANSCRIBE_TIMEOUT if the model "
+                    "legitimately needs longer)")
+        if reason == "throttled":
+            return ("transcribe skipped: worker restart throttled after a recent "
+                    "failure — next dictation retries")
+        if reason == "worker-exit":
+            return ("transcribe worker unavailable (it exited) — next dictation "
+                    "will restart it; see its stderr above")
+        if reason == "protocol":
+            return ("transcribe worker protocol error — worker killed, next "
+                    "dictation will restart it")
+        return f"transcribe failed: {reason}"
 
     def _spawn_paste(self, text: str):
         """Paste delivery subprocess (#29): the ONLY place paste.py is spawned.
@@ -447,6 +495,13 @@ class HoldDaemon:
         elif action == "stop":
             self.stop_recording()
 
+    def _prewarm(self):
+        """Background prewarm thread: never let a failure reach the read loop."""
+        try:
+            self.supervisor.prewarm()
+        except Exception as e:
+            print(f"[voice-hold] prewarm failed: {e}", file=sys.stderr)
+
     def _preflight(self) -> list:
         """启动预检(CR 发现 4/5):把所有「首次按键才会炸」的缺失提前到启动时报清。
         返回缺失项描述列表,空 = 全部就绪。"""
@@ -459,6 +514,13 @@ class HoldDaemon:
         for f in ("transcribe_once.py", "paste.py"):
             if not os.path.isfile(os.path.join(REPO_DIR, f)):
                 missing.append(f"{f} missing under {REPO_DIR} — repo checkout broken?")
+        # 常驻 worker 是默认路径但只在 spawn 时才被打开——预检挡住半部署
+        # checkout（缺文件时启动即报，而不是每次听写 spawn 失败）（CR r1 #2）
+        if self.resident and not os.path.isfile(
+                os.path.join(REPO_DIR, "transcribe_worker.py")):
+            missing.append(f"transcribe_worker.py missing under {REPO_DIR} — "
+                           "resident worker unavailable (VOICE_INPUT_RESIDENT=0 "
+                           "falls back to per-dictation spawn)")
         return missing
 
     def run(self) -> int:
@@ -479,30 +541,38 @@ class HoldDaemon:
                   file=sys.stderr)
             return EXIT_DUPLICATE_INSTANCE
         self._lock_fd = fd  # close = release; process exit releases anyway
-        missing = self._preflight()
-        if missing:
-            for m in missing:
-                print(f"[voice-hold] preflight: {m}", file=sys.stderr)
-            return 3
         try:
-            import evdev
-        except ImportError:
-            print("[voice-hold] python-evdev missing — pacman -S python-evdev",
-                  file=sys.stderr)
-            return 3
-        dev = pick_device(evdev, self.env.get(ENV_DEVICE))
-        if dev is None:
-            print(
-                "[voice-hold] no keyboard device with KEY_RIGHTALT found — "
-                "check `input` group membership (needs re-login) or set "
-                f"{ENV_DEVICE}", file=sys.stderr)
-            return 3
-        print(f"[voice-hold] listening on {dev.path} ({dev.name})", flush=True)
-        # read_loop blocks; unplug raises OSError -> crash -> systemd restarts
-        for event in dev.read_loop():
-            if event.type == EV_KEY and event.code == KEY_RIGHTALT:
-                self.handle_key_value(event.value)
-        return 0
+            missing = self._preflight()
+            if missing:
+                for m in missing:
+                    print(f"[voice-hold] preflight: {m}", file=sys.stderr)
+                return 3
+            try:
+                import evdev
+            except ImportError:
+                print("[voice-hold] python-evdev missing — pacman -S python-evdev",
+                      file=sys.stderr)
+                return 3
+            dev = pick_device(evdev, self.env.get(ENV_DEVICE))
+            if dev is None:
+                print(
+                    "[voice-hold] no keyboard device with KEY_RIGHTALT found — "
+                    "check `input` group membership (needs re-login) or set "
+                    f"{ENV_DEVICE}", file=sys.stderr)
+                return 3
+            print(f"[voice-hold] listening on {dev.path} ({dev.name})", flush=True)
+            if self.resident:
+                threading.Thread(target=self._prewarm, daemon=True).start()
+            # read_loop blocks; unplug raises OSError -> crash -> systemd restarts
+            for event in dev.read_loop():
+                if event.type == EV_KEY and event.code == KEY_RIGHTALT:
+                    self.handle_key_value(event.value)
+            return 0
+        finally:
+            # G5 (#25): every post-lock exit path (preflight/evdev/device
+            # failure included) shuts the worker down; idempotent, and a
+            # no-op pre-spawn, so this is strictly stronger than loop-only.
+            self.supervisor.shutdown()
 
 
 def main() -> int:

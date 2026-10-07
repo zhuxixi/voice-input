@@ -152,7 +152,8 @@ systemctl --user enable --now voice-hold.service
 
   然后 `systemctl --user daemon-reload && systemctl --user restart ydotool`。
 - 转写受 `VOICE_INPUT_TRANSCRIBE_TIMEOUT`（默认 120 秒）约束：挂死的子进程会被
-  杀掉，热键继续可用而不是永久冻结。NPU 清缓存后首次运行建议 ≥240s（冷编译）。
+  杀掉，热键继续可用而不是永久冻结；常驻 worker 同样在此超时被杀，并在下一次
+  听写时重建。NPU 清缓存后首次运行建议 ≥240s（冷编译）。
 
 ## 配置
 
@@ -165,6 +166,7 @@ systemctl --user enable --now voice-hold.service
 | `~/.config/voice-input/terms.json` | （无） | 自定义词汇热词，见下 | 编辑该文件 |
 | `VOICE_INPUT_WAYLAND_METHOD` | `paste` | Wayland 上屏方式：`paste` = 剪贴板粘贴（`wl-copy` + `ydotool` 组合键），`type` = 模拟打字 | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_WAYLAND_METHOD=type` |
 | `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | paste 方式的组合键（终端惯例；VS Code 等只认 `ctrl+v` 的应用改这个） | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_PASTE_COMBO=ctrl+v` |
+| `VOICE_INPUT_RESIDENT` | `1`（开） | 常驻转写 worker：模型跨听写常驻（daemon 启动即预热）。`0` = 退回旧的每次听写 spawn（每次都重新加载模型） | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_RESIDENT=0` |
 
 ### NPU 引擎（Intel AI Boost，如 Lunar Lake）
 
@@ -188,8 +190,10 @@ voice_hold 会自动注入；手工跑 CLI 需自己 export）。
 可先跑一次 `VOICE_INPUT_ENGINE=npu ./test-mic.sh` 预热，或接受第一次听写较慢。
 热词（terms.json）自 #27 起 **NPU 支持**（stateful 管线 + 构造期 word_timestamps）；
 热词是概率性软引导而非保证，偶尔也会改动附近的常用词（实测例：语音 → 语言）。Wayland 按住说话链路经
-transcribe_once.py 自动吃到词表。每次听写仍有约 1.4s 加载（#18 子进程架构），
-常驻转写 worker 见 #25。
+transcribe_once.py 自动吃到词表。常驻转写 worker（#25）让模型跨听写复用：daemon
+启动即预热，每次听写省下约 1.0–1.45s 的模型加载；清空编译缓存后的首次听写也不再
+在听写内部付 ~155s 冷编译（编译挪到 daemon 启动期）。`bench/hold-latency.py`
+可分别测两条路径（常驻 vs 旧的每次 spawn）。
 
 ### 自定义词汇（热词）
 
@@ -276,6 +280,10 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 
 模型预加载常驻显存，每次按键松开后转写几乎瞬时完成（无需重新加载模型）。
 
+NPU 路径上常驻转写 worker（#25）在 daemon 生命周期内持有模型，约 1.1 GB RSS；
+worker 挂死会在 `VOICE_INPUT_TRANSCRIBE_TIMEOUT` 被杀并在下一次听写时重建。设
+`VOICE_INPUT_RESIDENT=0` 可退回每次听写 spawn（见[配置](#配置)）。
+
 ## 硬件参考
 
 作者的环境，供参考：
@@ -308,7 +316,7 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 ## 测试
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker -v
 ```
 
 测试仅用标准库，不依赖 GPU。
