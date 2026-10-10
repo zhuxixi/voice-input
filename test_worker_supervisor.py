@@ -144,7 +144,7 @@ class TestProcAlive(unittest.TestCase):
 
     def test_alive_process_returns_true(self):
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-        self.addCleanup(proc.kill)
+        self.addCleanup(lambda p=proc: (p.kill(), p.wait()))
         self.assertTrue(ws._proc_alive(proc))
 
     def test_exited_process_returns_false(self):
@@ -467,7 +467,7 @@ class TestIdleDeath(SupervisorTestCase):
         text, reason = sup.request("/tmp/x.wav", timeout=10.0)
         self.assertEqual((text, reason), ("stub-text", None))
         self.assertNotEqual(live_worker(sup).pid, old_pid)
-        self.assertTrue(any("died while idle" in m for m in self.logs), self.logs)
+        self.assertTrue(any("died while idle (pid" in m for m in self.logs), self.logs)
 
     def test_idle_death_within_throttle_interval_fails_throttled(self):
         """A4: no throttle exemption — death <1s after spawn => throttled."""
