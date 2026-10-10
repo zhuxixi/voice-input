@@ -21,8 +21,11 @@ import worker_supervisor as ws
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 
-# Stub worker: `--protocol-fd N` + STUB_MODE in {ok, slow-ready, never, die, bad-line}.
+# Stub worker: `--protocol-fd N` + STUB_MODE in {ok, slow-ready, never, die, bad-line,
+# die-after-ready}.
 # `ok` answers each request with "stub-text"; `slow-ready` sleeps STUB_DELAY before ready.
+# `die-after-ready` (first generation only, keyed on STUB_MARKER) exits right after
+# announcing ready — a worker that dies while idle.
 STUB_WORKER = textwrap.dedent(
     '''
     import json, os, socket, sys, time
@@ -41,9 +44,17 @@ STUB_WORKER = textwrap.dedent(
         f.write(b"{not json}\\n"); f.flush()
         time.sleep(30); sys.exit(0)
 
+    die_after = (mode == "die-after-ready"
+                 and not os.path.exists(os.environ["STUB_MARKER"]))
+    if die_after:
+        open(os.environ["STUB_MARKER"], "w").close()
+
     f.write((json.dumps({"event": "ready", "protocol": 1, "pid": os.getpid(),
                          "engine": "stub", "model": "stub", "load_s": 0.01}) + "\\n").encode())
     f.flush()
+
+    if die_after:
+        sys.exit(0)                      # 首代：发完 ready 即退出（模拟空闲死亡）
 
     while True:
         line = f.readline()
@@ -432,3 +443,40 @@ class TestPrewarmAndShutdown(SupervisorTestCase):
         sup.shutdown()
         self.assertIsNotNone(proc)
         self.assertIsNotNone(proc.poll())
+
+
+class TestIdleDeath(SupervisorTestCase):
+    """A2/A4 (#37): worker died while idle — same-request rebuild, no exemption
+    from the restart throttle. Known residual: a death landing between the
+    fast-path poll() and the request write still fails that dictation via the
+    existing mid-request EOF path (spec §2, narrowed but not eliminable)."""
+
+    mode = "die-after-ready"
+
+    def setUp(self):
+        super().setUp()
+        self.env["STUB_MARKER"] = os.path.join(self._tmp, "stub-gen-marker")
+
+    def test_idle_death_rebuilds_within_the_same_request(self):
+        """A2: next request after idle death returns text, not worker-exit."""
+        sup = self.make_supervisor()
+        self.assertTrue(sup.prewarm())
+        old_pid = live_worker(sup).pid
+        live_worker(sup).wait(timeout=5)          # first instance exits on its own
+        self.clock.advance(ws.WORKER_RESTART_MIN_INTERVAL + 0.01)
+        text, reason = sup.request("/tmp/x.wav", timeout=10.0)
+        self.assertEqual((text, reason), ("stub-text", None))
+        self.assertNotEqual(live_worker(sup).pid, old_pid)
+        self.assertTrue(any("died while idle" in m for m in self.logs), self.logs)
+
+    def test_idle_death_within_throttle_interval_fails_throttled(self):
+        """A4: no throttle exemption — death <1s after spawn => throttled."""
+        sup = self.make_supervisor()
+        with mock.patch.object(sup, "_spawn_fn", wraps=sup._spawn_fn) as spy:
+            self.assertTrue(sup.prewarm())
+            live_worker(sup).wait(timeout=5)
+            self.clock.advance(0.5)               # < WORKER_RESTART_MIN_INTERVAL
+            text, reason = sup.request("/tmp/x.wav", timeout=10.0)
+            self.assertEqual((text, reason), (None, "throttled"))
+            self.assertEqual(spy.call_count, 1)   # only prewarm's spawn
+            self.assertTrue(any("died while idle" in m for m in self.logs), self.logs)
