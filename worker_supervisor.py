@@ -27,6 +27,11 @@ def resident_enabled(env: dict) -> bool:
     return env.get(ENV_RESIDENT, "1") != "0"
 
 
+def _proc_alive(proc) -> bool:
+    """True iff the child has not exited yet (one WNOHANG poll; reaps a zombie)."""
+    return proc.poll() is None
+
+
 class _Startup:
     """One in-flight worker start (spec D15).
 

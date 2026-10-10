@@ -128,6 +128,20 @@ class TestResidentEnabled(unittest.TestCase):
                 self.assertTrue(ws.resident_enabled({ws.ENV_RESIDENT: value}))
 
 
+class TestProcAlive(unittest.TestCase):
+    """A1 (#37): liveness predicate — alive True, exited False (reaps zombie)."""
+
+    def test_alive_process_returns_true(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(proc.kill)
+        self.assertTrue(ws._proc_alive(proc))
+
+    def test_exited_process_returns_false(self):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        self.assertFalse(ws._proc_alive(proc))
+
+
 class TestSpawnAndRequest(SupervisorTestCase):
     """A3 (#25): happy path — ready handshake, request/response, spawn contract."""
 
