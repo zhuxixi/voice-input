@@ -27,6 +27,11 @@ def resident_enabled(env: dict) -> bool:
     return env.get(ENV_RESIDENT, "1") != "0"
 
 
+def _proc_alive(proc) -> bool:
+    """True iff the child has not exited yet (one WNOHANG poll; reaps a zombie)."""
+    return proc.poll() is None
+
+
 class _Startup:
     """One in-flight worker start (spec D15).
 
@@ -132,7 +137,15 @@ class WorkerSupervisor:
                     # straggler request degrades cleanly instead (CR r1 #1)
                     return False, "worker-exit"
                 if self._ready and self._startup is not None:
-                    return True, None
+                    if _proc_alive(self._startup.proc):
+                        return True, None
+                    pid = self._startup.pid or self._startup.proc.pid
+                    self._log(f"[voice-hold] worker died while idle (pid {pid}) — "
+                              "rebuilding it for this dictation")
+                    self._kill_locked()
+                    # fall through: same iteration re-reads self._startup (now
+                    # None) and takes the existing spawn path (D5 lazy detect,
+                    # discovered at request start instead of mid-request EOF)
                 startup = self._startup
                 if startup is None or startup.error is not None:
                     if startup is not None and startup.error is not None:
