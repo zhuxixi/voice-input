@@ -72,8 +72,9 @@ Python 3.14（本机 3.14.7 验证）：`Popen.kill()` 对已退出/已回收子
 
 ### 2.4 并发与竞态说明
 
-- 两个线程同时撞上死 worker：均可能打出一行死亡日志（真实事件，可接受）；`_kill_locked`
-  幂等（后到者拿到 `_startup=None` 直接返回）；随后 owner/joiner 逻辑保证单飞 spawn。
+- 两个线程同时撞上死 worker：检测+日志+`_kill_locked`+重建决策在同一次 `self._lock` 持锁内完成，
+  `_kill_locked` 置 `_ready=False` 后第二个线程不会重入死亡分支——死亡日志每次死亡事件恰好一行；
+  后到线程按 owner/joiner 语义加入重建（`_kill_locked` 幂等，`_startup=None` 直返）。
 - `shutdown()` 竞态：`_shutdown_done` 检查在快速路径之前（既有顺序），关停后不 respawn。
 - 健康路径：`poll()` 对活进程返回 None，行为与现状逐字节一致。
 

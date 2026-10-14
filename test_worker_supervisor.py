@@ -45,7 +45,7 @@ STUB_WORKER = textwrap.dedent(
         time.sleep(30); sys.exit(0)
 
     die_after = (mode == "die-after-ready"
-                 and not os.path.exists(os.environ["STUB_MARKER"]))
+                 and not os.path.exists(os.environ.get("STUB_MARKER", os.devnull)))
     if die_after:
         open(os.environ["STUB_MARKER"], "w").close()
 
