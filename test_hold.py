@@ -58,6 +58,38 @@ class TestStateMachine(unittest.TestCase):
                     (True, True, None))
 
 
+class TestFeedbackTransition(unittest.TestCase):
+    """A1: pure state machine — six explicit transitions, everything else unchanged."""
+
+    def test_explicit_transitions(self):
+        cases = [
+            ("idle", "start", "recording", "show_rec"),
+            ("recording", "stop", "transcribing", "show_transcribing"),
+            ("transcribing", "ok", "done", "show_done"),
+            ("transcribing", "fail", "idle", "hide"),
+            ("done", "done_timeout", "idle", "hide"),
+            ("done", "start", "recording", "show_rec"),
+        ]
+        for state, event, want_state, want_action in cases:
+            with self.subTest(state=state, event=event):
+                self.assertEqual(
+                    voice_hold.feedback_transition(state, event),
+                    (want_state, want_action))
+
+    def test_everything_else_is_a_noop(self):
+        cases = [
+            ("idle", "ok"), ("idle", "fail"), ("idle", "done_timeout"),
+            ("recording", "start"), ("recording", "ok"), ("recording", "fail"),
+            ("transcribing", "start"), ("transcribing", "stop"),
+            ("done", "stop"), ("done", "ok"),
+            ("idle", "bogus"), ("recording", "bogus"),
+        ]
+        for state, event in cases:
+            with self.subTest(state=state, event=event):
+                self.assertEqual(
+                    voice_hold.feedback_transition(state, event), (state, None))
+
+
 class TestDevicePredicate(unittest.TestCase):
     """A8: keyboard-class detection and ydotool exclusion."""
 

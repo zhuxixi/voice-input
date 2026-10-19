@@ -82,6 +82,23 @@ def transition(value: int, recording: bool, busy: bool = False):
     return recording, False, None
 
 
+# Feedback state machine (#24): states idle/recording/transcribing/done.
+# Actions drive the overlay from the main-thread tick only.
+FEEDBACK_TRANSITIONS = {
+    ("idle", "start"): ("recording", "show_rec"),
+    ("recording", "stop"): ("transcribing", "show_transcribing"),
+    ("transcribing", "ok"): ("done", "show_done"),
+    ("transcribing", "fail"): ("idle", "hide"),
+    ("done", "done_timeout"): ("idle", "hide"),
+    ("done", "start"): ("recording", "show_rec"),
+}
+
+
+def feedback_transition(state: str, event: str):
+    """Pure: (state, event) -> (new_state, action or None)."""
+    return FEEDBACK_TRANSITIONS.get((state, event), (state, None))
+
+
 def is_dropped_press(value: int, was_busy: bool) -> bool:
     """True when a key event will be silently dropped because the pipeline
     is busy (#29 D5): only presses are worth logging — autorepeat fires
