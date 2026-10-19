@@ -2,11 +2,13 @@ import contextlib
 import engine
 import io
 import os
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -487,6 +489,142 @@ class TestIterEvents(unittest.TestCase):
         dev = self._Dev(OSError("unplugged"))
         with self.assertRaises(OSError):
             voice_hold.iter_events(dev, 0.2, lambda r, w, x, t: (r, [], []))
+
+
+class TestDeliverTick(unittest.TestCase):
+    """A4: single FIFO, paste result mapping, tick application, key dispatch."""
+
+    def _daemon(self):
+        return voice_hold.HoldDaemon(env={})
+
+    def test_paste_and_report_returns_bool(self):
+        d = self._daemon()
+        d._spawn_paste = lambda text: (0, False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(d._paste_and_report("hi"))
+        d._spawn_paste = lambda text: (3, False)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertFalse(d._paste_and_report("hi"))
+        d._spawn_paste = lambda text: (None, True)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertFalse(d._paste_and_report("hi"))
+
+    def test_deliver_posts_ok_only_after_successful_paste(self):
+        d = self._daemon()
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = voice_hold.new_recording_path(tmp)
+            with open(wav, "wb") as f:
+                f.write(b"\0" * 2048)
+            d.wav_path = wav
+            d._transcribe_legacy = lambda path: "hello"
+            d.resident = False
+            with mock.patch.object(d, "_paste_and_report", return_value=True):
+                d._deliver()
+        self.assertEqual(d._ui_queue.get_nowait(), "ok")
+        self.assertFalse(d.busy)
+
+    def test_deliver_posts_fail_when_paste_fails(self):
+        d = self._daemon()
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = voice_hold.new_recording_path(tmp)
+            with open(wav, "wb") as f:
+                f.write(b"\0" * 2048)
+            d.wav_path = wav
+            d._transcribe_legacy = lambda path: "hello"
+            d.resident = False
+            with mock.patch.object(d, "_paste_and_report", return_value=False):
+                d._deliver()
+        self.assertEqual(d._ui_queue.get_nowait(), "fail")
+        self.assertFalse(d.busy)
+
+    def test_deliver_posts_fail_for_no_speech_and_short_recording(self):
+        d = self._daemon()
+        with tempfile.TemporaryDirectory() as tmp:
+            short = voice_hold.new_recording_path(tmp)
+            d.wav_path = short
+            with contextlib.redirect_stderr(io.StringIO()):
+                d._deliver()
+            self.assertEqual(d._ui_queue.get_nowait(), "fail")
+            wav = voice_hold.new_recording_path(tmp)
+            with open(wav, "wb") as f:
+                f.write(b"\0" * 2048)
+            d.wav_path = wav
+            d._transcribe_legacy = lambda path: ""
+            d.resident = False
+            with contextlib.redirect_stdout(io.StringIO()):
+                d._deliver()
+            self.assertEqual(d._ui_queue.get_nowait(), "fail")
+
+    def test_tick_applies_queue_and_done_timeout(self):
+        d = self._daemon()
+        d.overlay = mock.Mock()
+        d._ui_queue.put("start")
+        d._tick()
+        self.assertEqual(d.feedback_state, "recording")
+        d.overlay.show.assert_called_with("● REC", "#ff5555")
+        d._ui_queue.put("stop")
+        d._tick()
+        self.assertEqual(d.feedback_state, "transcribing")
+        d.overlay.show.assert_called_with("转写中…", "#ffaa00")
+        d._ui_queue.put("ok")
+        d._tick()
+        self.assertEqual(d.feedback_state, "done")
+        d.overlay.show.assert_called_with("DONE", "#55ff55")
+        d._done_deadline = time.monotonic() - 1
+        d._tick()
+        self.assertEqual(d.feedback_state, "idle")
+        d.overlay.hide.assert_called()
+
+    def test_tick_survives_overlay_exception(self):
+        d = self._daemon()
+        d.overlay = mock.Mock()
+        d.overlay.show.side_effect = RuntimeError("dead GTK")
+        d._ui_queue.put("start")
+        d._tick()  # must not raise
+        d.overlay._disable.assert_called_once()
+        self.assertEqual(d.feedback_state, "recording")
+
+    def test_handle_key_value_enqueues_before_starting_worker(self):
+        d = self._daemon()
+        d.overlay = mock.Mock()
+        with mock.patch.object(d, "start_recording") as start:
+            d.handle_key_value(1)
+            start.assert_called_once()
+        self.assertEqual(d._ui_queue.get_nowait(), "start")
+        with mock.patch.object(d, "stop_recording"):
+            d.handle_key_value(0)
+        self.assertEqual(d._ui_queue.get_nowait(), "stop")
+
+    def test_stop_enqueues_stop_before_worker_thread_starts(self):
+        d = self._daemon()
+        d.recording = True
+        seen = []
+        class FakeThread:
+            def __init__(self, target=None, daemon=None):
+                self.target = target
+                self.daemon = daemon
+            def start(self):
+                seen.append(d._ui_queue.get_nowait())
+        with mock.patch.object(voice_hold.threading, "Thread", FakeThread):
+            d.handle_key_value(0)
+        self.assertEqual(seen, ["stop"])
+
+    def test_stop_recording_never_touches_overlay(self):
+        d = self._daemon()
+        d.overlay = mock.Mock()
+        with mock.patch.object(voice_hold.threading, "Thread"):
+            d.stop_recording()
+        self.assertEqual(d.overlay.mock_calls, [])
+
+    def test_busy_key_is_dropped_without_events(self):
+        d = self._daemon()
+        d.busy = True
+        with mock.patch.object(d, "start_recording") as start:
+            d.handle_key_value(1)
+            d.handle_key_value(0)
+            start.assert_not_called()
+        with self.assertRaises(queue.Empty):
+            d._ui_queue.get_nowait()
 
 
 class TestSingletonLock(unittest.TestCase):

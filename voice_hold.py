@@ -19,6 +19,7 @@ root:input by default). Needs a re-login after `usermod -aG input $USER`.
 
 import fcntl
 import os
+import queue
 import select
 import subprocess
 import sys
@@ -49,6 +50,14 @@ EV_KEY = 1          # event type for keys
 # mechanism that made PIPE waits hang. No env knob on purpose: the timeout
 # is not a user-tunable semantic.
 PASTE_TIMEOUT = 10
+
+# Feedback overlay (#24): DONE stays visible briefly, then the tick hides it.
+FEEDBACK_DONE_S = 0.4   # DONE visibility before auto-hide
+FEEDBACK_TEXTS = {
+    "show_rec": ("● REC", "#ff5555"),
+    "show_transcribing": ("转写中…", "#ffaa00"),
+    "show_done": ("DONE", "#55ff55"),
+}
 
 # Overlay geometry (#24): fixed 160x48, centered on the primary monitor.
 OVERLAY_W, OVERLAY_H = 160, 48
@@ -219,11 +228,12 @@ def new_recording_path(tmpdir: str) -> str:
 
 
 class _Overlay:
-    """Minimal GTK floating indicator (undecorated TOPLEVEL kept above).
+    """Minimal GTK floating indicator.
 
-    gtk_window_move is a no-op under Wayland (clients cannot self-position) —
-    KWin places the window; README notes this. Any GTK failure disables the
-    overlay for the session: recording/transcription must never depend on it.
+    Prefers a gtk-layer-shell OVERLAY surface centered via anchors/margins;
+    falls back to a plain top-level window when layer-shell is unavailable.
+    Init failures retry on the next recording; passthrough failures never
+    disable the overlay (recording/transcription must not depend on it).
     """
 
     def __init__(self, gtk_module=None, layer_shell_module=None):
@@ -372,6 +382,9 @@ class HoldDaemon:
             engine.child_env(self.env),
         )
         self.overlay = _Overlay()
+        self.feedback_state = "idle"
+        self._ui_queue = queue.SimpleQueue()
+        self._done_deadline = None
         self._paused = []
         self._media_pause = None
         try:
@@ -401,7 +414,6 @@ class HoldDaemon:
             except OSError:
                 pass
             raise
-        self.overlay.show("● REC", "#ff5555")
         print(f"[voice-hold] recording -> {self.wav_path}", flush=True)
 
     def stop_recording(self):
@@ -433,14 +445,17 @@ class HoldDaemon:
             except Exception as e:
                 print(f"[voice-hold] resume_media failed: {e}", file=sys.stderr)
             self._paused = []
-        self.overlay.hide()
         self.busy = True
         threading.Thread(target=self._deliver, daemon=True).start()
 
     def _deliver(self):
         """工作线程:转写 + 上屏(带超时,Zima CR round-3 发现 2——挂死的子进程
         必须被杀掉,busy 必须总能回到 False,否则热键一次性永久失效)。
-        注意本函数不触碰 GTK(工作线程非 GTK 主线程)。"""
+        注意本函数不触碰 GTK(工作线程非 GTK 主线程)。
+
+        Every path posts exactly one feedback event (#24): "ok" only when
+        the paste succeeded, "fail" otherwise."""
+        ok = False
         try:
             time.sleep(0.3)  # let arecord finish flushing the wav (mirrors voice-ptt)
             wav = self.wav_path  # snapshot: busy-drop keeps this stable, but
@@ -469,8 +484,9 @@ class HoldDaemon:
             if not text:
                 print("[voice-hold] no speech recognized", flush=True)
                 return
-            self._paste_and_report(text)
+            ok = self._paste_and_report(text)
         finally:
+            self._ui_queue.put("ok" if ok else "fail")
             self.busy = False
 
     def _transcribe_resident(self, wav):
@@ -546,23 +562,26 @@ class HoldDaemon:
             return None, True
         return proc.returncode, False
 
-    def _paste_and_report(self, text: str):
+    def _paste_and_report(self, text: str) -> bool:
         """Deliver `text` and log the outcome (#29 test seam: depends only
         on _spawn_paste so the result branches are unit-testable without
         faking the transcribe pipeline — driving _deliver would still need
-        a real recording file, per-recording path since #28)."""
+        a real recording file, per-recording path since #28).
+
+        Returns True only when paste.py delivered the text (#24)."""
         rc, timed_out = self._spawn_paste(text)
         if timed_out:
             print("[voice-hold] paste timed out after "
                   f"{PASTE_TIMEOUT}s (hung child killed) — paste.py output "
                   "should be right above; if it isn't, check ydotoold "
                   "liveness (#29)", file=sys.stderr)
-            return
+            return False
         if rc != 0:
             print(f"[voice-hold] paste failed: paste.py exit {rc}",
                   file=sys.stderr)
-            return
+            return False
         print(f"[voice-hold] delivered: {text}", flush=True)
+        return True
 
     def _transcribe_timeout(self) -> float:
         raw = self.env.get("VOICE_INPUT_TRANSCRIBE_TIMEOUT", "120")
@@ -581,9 +600,46 @@ class HoldDaemon:
             print("[voice-hold] key press dropped while busy "
                   "(transcribe/paste in flight)", file=sys.stderr)
         if action == "start":
+            self._ui_queue.put("start")
             self.start_recording()
         elif action == "stop":
+            self._ui_queue.put("stop")   # before stop_recording() starts _deliver
             self.stop_recording()
+
+    def _apply_feedback(self, action):
+        if action == "hide":
+            try:
+                self.overlay.hide()
+            except Exception as e:
+                self.overlay._disable("tick", e)
+            return
+        text, color = FEEDBACK_TEXTS[action]
+        try:
+            self.overlay.show(text, color)
+        except Exception as e:
+            self.overlay._disable("tick", e)
+
+    def _tick(self):
+        """Main-thread feedback pump (#24): drain the event FIFO, apply the
+        pure state machine, then expire the DONE visibility window. Overlay
+        exceptions disable the overlay, never the loop."""
+        while True:
+            try:
+                event = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            new_state, action = feedback_transition(self.feedback_state, event)
+            self.feedback_state = new_state
+            self._done_deadline = (
+                time.monotonic() + FEEDBACK_DONE_S if new_state == "done" else None)
+            if action:
+                self._apply_feedback(action)
+        if (self.feedback_state == "done" and self._done_deadline is not None
+                and time.monotonic() >= self._done_deadline):
+            self.feedback_state, action = feedback_transition("done", "done_timeout")
+            self._done_deadline = None
+            if action:
+                self._apply_feedback(action)
 
     def _prewarm(self):
         """Background prewarm thread: never let a failure reach the read loop."""
@@ -653,11 +709,13 @@ class HoldDaemon:
             print(f"[voice-hold] listening on {dev.path} ({dev.name})", flush=True)
             if self.resident:
                 threading.Thread(target=self._prewarm, daemon=True).start()
-            # read_loop blocks; unplug raises OSError -> crash -> systemd restarts
-            for event in dev.read_loop():
-                if event.type == EV_KEY and event.code == KEY_RIGHTALT:
-                    self.handle_key_value(event.value)
-            return 0
+            # select tick blocks up to TICK_S; unplug raises OSError -> crash ->
+            # systemd restarts
+            while True:
+                for event in iter_events(dev, TICK_S, select.select):
+                    if event.type == EV_KEY and event.code == KEY_RIGHTALT:
+                        self.handle_key_value(event.value)
+                self._tick()
         finally:
             # G5 (#25): every post-lock exit path (preflight/evdev/device
             # failure included) shuts the worker down; idempotent, and a
