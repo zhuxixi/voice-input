@@ -170,6 +170,161 @@ class TestOverlayLazyInit(unittest.TestCase):
         self.assertEqual(proc.stdout.decode().strip(), "None False False")
 
 
+class _FakeGeom:
+    def __init__(self, width=1920, height=1080):
+        self.width, self.height = width, height
+
+
+class _FakeMonitor:
+    def get_geometry(self):
+        return _FakeGeom()
+
+
+class _FakeDisplay:
+    def get_primary_monitor(self):
+        return _FakeMonitor()
+
+
+class _FakeGdkWindow:
+    def __init__(self, fail=False):
+        self.calls = []
+        self.fail = fail
+
+    def set_pass_through(self, value):
+        self.calls.append(value)
+        if self.fail:
+            raise RuntimeError("pass-through unsupported")
+
+
+class _FakeWin:
+    def __init__(self):
+        self.calls = []
+        self.realized = False
+        self.gdk = _FakeGdkWindow()
+        self.destroyed = False
+
+    def set_decorated(self, v): self.calls.append(("set_decorated", v))
+    def set_keep_above(self, v): self.calls.append(("set_keep_above", v))
+    def set_skip_taskbar_hint(self, v): self.calls.append(("set_skip_taskbar_hint", v))
+    def set_default_size(self, w, h): self.calls.append(("set_default_size", w, h))
+    def add(self, w): self.calls.append(("add", w))
+    def show_all(self):
+        self.calls.append(("show_all",))
+        self.realized = True
+    def hide(self): self.calls.append(("hide",))
+    def destroy(self): self.destroyed = True
+    def get_window(self): return self.gdk if self.realized else None
+    def get_display(self): return _FakeDisplay()
+
+
+class _FakeGtk:
+    class WindowType:
+        TOPLEVEL = 0
+
+    class Window:
+        instances = []
+        def __new__(cls, **kwargs):
+            win = _FakeWin()
+            win.kwargs = kwargs
+            cls.instances.append(win)
+            return win
+
+    class Label:
+        def set_markup(self, markup): self.markup = markup
+
+    def __init__(self):
+        self.pending = False
+
+    def events_pending(self): return self.pending
+    def main_iteration_do(self, blocking): return False
+
+
+class _FakeLayerShell:
+    class Layer:
+        OVERLAY = 2
+
+    class KeyboardMode:
+        NONE = 0
+
+    class Edge:
+        LEFT = 0
+        TOP = 1
+
+    def __init__(self, supported=True, fail_init=False):
+        self.supported = supported
+        self.fail_init = fail_init
+        self.calls = []
+
+    def is_supported(self): return self.supported
+    def init_for_window(self, win):
+        self.calls.append(("init_for_window", win))
+        if self.fail_init:
+            raise RuntimeError("init failed")
+    def set_layer(self, win, layer): self.calls.append(("set_layer", layer))
+    def set_keyboard_mode(self, win, mode): self.calls.append(("set_keyboard_mode", mode))
+    def set_namespace(self, win, ns): self.calls.append(("set_namespace", ns))
+    def set_anchor(self, win, edge, on): self.calls.append(("set_anchor", edge, on))
+    def set_margin(self, win, edge, margin): self.calls.append(("set_margin", edge, margin))
+    def set_exclusive_zone(self, win, zone): self.calls.append(("set_exclusive_zone", zone))
+
+
+class TestOverlayLayerShell(unittest.TestCase):
+    """A2: layer-shell init params, fallback, realize-safe pointer passthrough."""
+
+    def _overlay(self, ls):
+        # Brief passes the _FakeGtk class, but its state/methods are
+        # instance-level; an instance is the module-like fake the tests need.
+        return voice_hold._Overlay(gtk_module=_FakeGtk(), layer_shell_module=ls)
+
+    def test_init_params_and_centering(self):
+        ls = _FakeLayerShell()
+        overlay = self._overlay(ls)
+        overlay._try_init()
+        win = _FakeGtk.Window.instances[-1]
+        self.assertTrue(overlay._layer_shell_active)
+        self.assertEqual(ls.calls[0][0], "init_for_window")
+        self.assertIn(("set_layer", 2), ls.calls)
+        self.assertIn(("set_keyboard_mode", 0), ls.calls)
+        self.assertIn(("set_namespace", "voice-hold-overlay"), ls.calls)
+        self.assertIn(("set_anchor", 0, True), ls.calls)
+        self.assertIn(("set_anchor", 1, True), ls.calls)
+        self.assertIn(("set_margin", 0, (1920 - 160) // 2), ls.calls)
+        self.assertIn(("set_margin", 1, (1080 - 48) // 2), ls.calls)
+        self.assertIn(("set_exclusive_zone", 0), ls.calls)
+
+    def test_passthrough_runs_after_realize_and_retries(self):
+        ls = _FakeLayerShell()
+        overlay = self._overlay(ls)
+        overlay.show("● REC", "#ff5555")
+        win = _FakeGtk.Window.instances[-1]
+        self.assertTrue(win.realized)
+        self.assertEqual(win.gdk.calls, [True])
+        overlay.show("转写中…", "#ffaa00")
+        self.assertEqual(win.gdk.calls, [True, True])  # idempotent retry
+
+    def test_unsupported_compositor_falls_back(self):
+        ls = _FakeLayerShell(supported=False)
+        overlay = self._overlay(ls)
+        overlay._try_init()
+        self.assertTrue(overlay._inited)
+        self.assertFalse(overlay._layer_shell_active)
+        self.assertNotIn("init_for_window", [c[0] for c in ls.calls])
+
+    def test_passthrough_failure_keeps_overlay_alive(self):
+        ls = _FakeLayerShell()
+        overlay = self._overlay(ls)
+        overlay._try_init()
+        win = _FakeGtk.Window.instances[-1]
+        win.gdk.fail = True
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            overlay.show("● REC", "#ff5555")
+            overlay.show("● REC", "#ff5555")
+        self.assertFalse(overlay._dead)
+        self.assertEqual(err.getvalue().count("pointer passthrough unavailable"), 2)
+        self.assertEqual(win.calls.count(("show_all",)), 2)
+
+
 class TestModulePurity(unittest.TestCase):
     """A9: import must stay stdlib-only (no evdev/gi needed at import time)."""
 

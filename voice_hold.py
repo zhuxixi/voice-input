@@ -49,6 +49,10 @@ EV_KEY = 1          # event type for keys
 # is not a user-tunable semantic.
 PASTE_TIMEOUT = 10
 
+# Overlay geometry (#24): fixed 160x48, centered on the primary monitor.
+OVERLAY_W, OVERLAY_H = 160, 48
+LAYER_SHELL_NAMESPACE = "voice-hold-overlay"
+
 # Key event values (linux/input.h)
 _PRESS, _RELEASE, _REPEAT = 1, 0, 2
 
@@ -203,7 +207,7 @@ class _Overlay:
     overlay for the session: recording/transcription must never depend on it.
     """
 
-    def __init__(self):
+    def __init__(self, gtk_module=None, layer_shell_module=None):
         # 惰性初始化(Zima CR round-3 发现 3 + systemd 排序):GTK 延后到首次
         # show()——daemon 在 graphical-session 环境就绪前启动时,监听照常工作,
         # 浮层等会话环境到位后的第一次录音再初始化;初始化失败每次录音重试
@@ -212,27 +216,63 @@ class _Overlay:
         self._win = None
         self._label = None
         self._Gtk = None
+        self._gtk_module = gtk_module
+        self._layer_shell_module = layer_shell_module
+        self._layer_shell_active = False
 
     def _try_init(self):
         if self._inited or self._dead:
             return
         try:
-            import gi
-            gi.require_version("Gtk", "3.0")
-            from gi.repository import Gtk
-            self._Gtk = Gtk
-            win = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
+            if self._gtk_module is None:
+                import gi
+                gi.require_version("Gtk", "3.0")
+                from gi.repository import Gtk as gtk_module
+            else:
+                gtk_module = self._gtk_module
+            self._Gtk = gtk_module
+            win = gtk_module.Window(type=gtk_module.WindowType.TOPLEVEL)
             win.set_decorated(False)
             win.set_keep_above(True)
             win.set_skip_taskbar_hint(True)
-            win.set_default_size(160, 48)
-            self._label = Gtk.Label()
+            win.set_default_size(OVERLAY_W, OVERLAY_H)
+            self._label = gtk_module.Label()
             win.add(self._label)
             self._win = win
+            self._setup_layer_shell(win)
             self._inited = True
         except Exception as e:
             print(f"[voice-hold] overlay unavailable (retry next recording): {e}",
                   file=sys.stderr)
+
+    def _setup_layer_shell(self, win):
+        """OVERLAY layer + keyboard/pointer pass-through; never fatal."""
+        try:
+            if self._layer_shell_module is None:
+                import gi
+                gi.require_version("GtkLayerShell", "0.1")
+                from gi.repository import GtkLayerShell as ls
+            else:
+                ls = self._layer_shell_module
+            if not ls.is_supported():
+                raise RuntimeError("layer-shell not supported by this compositor")
+            ls.init_for_window(win)
+            ls.set_layer(win, ls.Layer.OVERLAY)
+            ls.set_keyboard_mode(win, ls.KeyboardMode.NONE)
+            ls.set_namespace(win, LAYER_SHELL_NAMESPACE)
+            display = win.get_display()
+            if display is None:
+                from gi.repository import Gdk
+                display = Gdk.Display.get_default()
+            geom = display.get_primary_monitor().get_geometry()
+            ls.set_anchor(win, ls.Edge.LEFT, True)
+            ls.set_anchor(win, ls.Edge.TOP, True)
+            ls.set_margin(win, ls.Edge.LEFT, (geom.width - OVERLAY_W) // 2)
+            ls.set_margin(win, ls.Edge.TOP, (geom.height - OVERLAY_H) // 2)
+            ls.set_exclusive_zone(win, 0)
+            self._layer_shell_active = True
+        except Exception:
+            self._layer_shell_active = False
 
     def _pump(self, seconds=0.0):
         end = time.time() + seconds
@@ -253,6 +293,19 @@ class _Overlay:
         except Exception:
             pass
 
+    def _apply_ptr_passthrough(self):
+        """Pass clicks through to the window below; needs a realized window."""
+        if not self._layer_shell_active:
+            return
+        gdk_win = self._win.get_window()
+        if gdk_win is None:          # not realized yet: retried on the next show()
+            return
+        try:
+            gdk_win.set_pass_through(True)   # GDK 3.24.52 typelib
+        except Exception as e:       # lose passthrough only; keep the overlay alive
+            print(f"[voice-hold] pointer passthrough unavailable: {e}",
+                  file=sys.stderr)
+
     def show(self, text, color):
         if self._dead:
             return
@@ -264,6 +317,7 @@ class _Overlay:
             self._label.set_markup(
                 f"<span font='16' foreground='{color}'>{text}</span>")
             self._win.show_all()
+            self._apply_ptr_passthrough()
             self._pump()
         except Exception as e:
             self._disable("show", e)

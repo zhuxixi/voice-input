@@ -57,6 +57,9 @@ leaves your machine.
 - ALSA (`arecord`) and PipeWire (capture goes through the `default` source)
 - `xdotool`, `xsel`
 - GTK3 (`gi`) on the system Python
+- `gtk-layer-shell` (Arch `extra`; 0.10.1 tested KDE Plasma 6.7.5) — keeps the
+  hold overlay visible over full-screen windows. Missing package or non-Wayland
+  session silently falls back to the plain top-level window.
 - faster-whisper + ctranslate2, pynput (installed in a venv)
 
 ## Installation
