@@ -448,6 +448,47 @@ class TestBusyDropLogging(unittest.TestCase):
         self.assertEqual(err.getvalue(), "")
 
 
+class TestIterEvents(unittest.TestCase):
+    """A3: select seam — timeout, ready drain, OSError passthrough."""
+
+    class _Dev:
+        fd = 9
+        def __init__(self, result):
+            self.result = result
+            self.reads = 0
+        def read(self):
+            self.reads += 1
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+
+    def test_timeout_returns_empty(self):
+        dev = self._Dev([object()])
+        self.assertEqual(
+            voice_hold.iter_events(dev, 0.2, lambda r, w, x, t: ([], [], [])), [])
+        self.assertEqual(dev.reads, 0)
+
+    def test_ready_returns_all_pending(self):
+        events = [object(), object()]
+        dev = self._Dev(events)
+        seen = {}
+        def fake_select(r, w, x, t):
+            seen["args"] = (r, t)
+            return (r, [], [])
+        self.assertEqual(voice_hold.iter_events(dev, 0.2, fake_select), events)
+        self.assertEqual(seen["args"], ([9], 0.2))
+
+    def test_blocking_io_returns_empty(self):
+        dev = self._Dev(BlockingIOError())
+        self.assertEqual(
+            voice_hold.iter_events(dev, 0.2, lambda r, w, x, t: (r, [], [])), [])
+
+    def test_oserror_propagates(self):
+        dev = self._Dev(OSError("unplugged"))
+        with self.assertRaises(OSError):
+            voice_hold.iter_events(dev, 0.2, lambda r, w, x, t: (r, [], []))
+
+
 class TestSingletonLock(unittest.TestCase):
     """A1-A6 (#28): lock path derivation + flock semantics. All fs work is
     isolated under a per-test tmpdir; nothing here touches arecord/evdev."""

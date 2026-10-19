@@ -19,6 +19,7 @@ root:input by default). Needs a re-login after `usermod -aG input $USER`.
 
 import fcntl
 import os
+import select
 import subprocess
 import sys
 import tempfile
@@ -109,6 +110,24 @@ def is_dropped_press(value: int, was_busy: bool) -> bool:
     dozens of times per second while the key is held, release carries no
     user intent of its own."""
     return was_busy and value == _PRESS
+
+
+TICK_S = 0.2   # main-loop select timeout; upper bound on feedback latency
+
+
+def iter_events(dev, timeout, select_fn):
+    """Non-blocking drain seam (#24): one select + one read per ready tick.
+
+    BlockingIOError (spurious wake / drained fd) yields []; OSError (device
+    unplug) propagates so systemd restarts the daemon, unchanged semantics.
+    """
+    ready, _, _ = select_fn([dev.fd], [], [], timeout)
+    if not ready:
+        return []
+    try:
+        return list(dev.read())
+    except BlockingIOError:
+        return []
 
 
 def pick_device(evdev, wanted: str = None):
