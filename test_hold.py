@@ -312,6 +312,13 @@ class TestOverlayLayerShell(unittest.TestCase):
         self.assertFalse(overlay._layer_shell_active)
         self.assertNotIn("init_for_window", [c[0] for c in ls.calls])
 
+    def test_init_failure_falls_back(self):
+        ls = _FakeLayerShell(fail_init=True)
+        overlay = self._overlay(ls)
+        overlay._try_init()
+        self.assertTrue(overlay._inited)
+        self.assertFalse(overlay._layer_shell_active)
+
     def test_passthrough_failure_keeps_overlay_alive(self):
         ls = _FakeLayerShell()
         overlay = self._overlay(ls)
@@ -533,6 +540,20 @@ class TestDeliverTick(unittest.TestCase):
             d._transcribe_legacy = lambda path: "hello"
             d.resident = False
             with mock.patch.object(d, "_paste_and_report", return_value=False):
+                d._deliver()
+        self.assertEqual(d._ui_queue.get_nowait(), "fail")
+        self.assertFalse(d.busy)
+
+    def test_deliver_posts_fail_when_transcribe_raises(self):
+        d = self._daemon()
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = voice_hold.new_recording_path(tmp)
+            with open(wav, "wb") as f:
+                f.write(b"\0" * 2048)
+            d.wav_path = wav
+            d.resident = False
+            d._transcribe_legacy = mock.Mock(side_effect=RuntimeError("boom"))
+            with self.assertRaises(RuntimeError):
                 d._deliver()
         self.assertEqual(d._ui_queue.get_nowait(), "fail")
         self.assertFalse(d.busy)

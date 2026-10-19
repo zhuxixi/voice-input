@@ -417,9 +417,10 @@ class HoldDaemon:
         print(f"[voice-hold] recording -> {self.wav_path}", flush=True)
 
     def stop_recording(self):
-        """同步快停(毫秒~2.5s 级):杀录音、恢复媒体、藏浮层;转写+上屏交给
-        工作线程(Zima CR round-3 发现 1),read_loop 继续消费事件——忙态期间
-        的新按键由 transition 丢弃,不会被 evdev 缓冲成迟到的幽灵录音。"""
+        """同步快停(毫秒~2.5s 级):杀录音、恢复媒体;转写+上屏交给
+        工作线程(Zima CR round-3 发现 1)。浮层由主线程 _tick 消费 FIFO 后
+        隐藏;select tick 在忙态期间继续消费事件,新按键由 transition 丢弃,
+        不会被 evdev 缓冲成迟到的幽灵录音。"""
         rec, self.rec_proc = self.rec_proc, None
         print("[voice-hold] released -> transcribing", flush=True)
         if rec is not None:
