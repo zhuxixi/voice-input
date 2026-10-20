@@ -1,6 +1,7 @@
 """A7 (#25): worker loop — ready line, per-request terms reload, error survival, EOF."""
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -57,11 +58,12 @@ class WorkerHarness(unittest.TestCase):
         self.child_file = self.child.makefile("rwb")
         self.done = None
 
-    def start(self):
+    def start(self, log=None):
         def run():
             self.done = tw.worker_main(self.child_file, model_factory=lambda: self.model,
                                        terms_loader=lambda path=None: tw.load_terms(
-                                           self.terms_path))
+                                           self.terms_path),
+                                       log=log)
         t = threading.Thread(target=run, daemon=True)
         t.start()
         self.addCleanup(t.join, 5.0)
@@ -145,6 +147,34 @@ class TestWorkerLoop(WorkerHarness):
                 break
             import time; time.sleep(0.05)
         self.assertEqual(self.done, 3)
+
+
+class TestVadWiring(WorkerHarness):
+    def _patch_trim(self, value):
+        @contextlib.contextmanager
+        def fake(path, **kwargs):
+            yield value
+        return mock.patch.object(tw.vad_trim, "trimmed_wav", fake)
+
+    def test_no_speech_returns_empty_text(self):
+        logs = []
+        self.start(log=logs.append)
+        self.read()
+        with self._patch_trim(None):
+            self.parent.write(wp.encode_request(1, "/tmp/a.wav"))
+            self.parent.flush()
+            self.assertEqual(self.read(), {"id": 1, "text": ""})
+        self.assertEqual(self.model.calls, [])
+        self.assertIn("vad: no speech", "\n".join(logs))
+
+    def test_trimmed_path_reaches_model(self):
+        self.start()
+        self.read()
+        with self._patch_trim("/tmp/trimmed.wav"):
+            self.parent.write(wp.encode_request(1, "/tmp/a.wav"))
+            self.parent.flush()
+            self.assertEqual(self.read(), {"id": 1, "text": "你好"})
+        self.assertEqual(self.model.calls[0]["wav"], "/tmp/trimmed.wav")
 
 
 class TestPreambleInvalidEngine(unittest.TestCase):
