@@ -43,6 +43,7 @@ if not _SITE or not os.path.isdir(_SITE):
 import engine  # 顶层纯标准库(#16);preamble 计算收敛到 engine 单点(#19 债①)
 from terms import (DEFAULT_TERMS_PATH, build_prompt, build_transcribe_kwargs,
                    load_terms)
+import vad_trim
 
 try:
     _ENG = engine.engine_name(dict(os.environ))
@@ -88,10 +89,14 @@ def main(argv=None, terms_path=DEFAULT_TERMS_PATH) -> int:
         print(f"[voice-input] terms assemble failed, degrade to no-prompt: {te}",
               file=sys.stderr)
     model = engine.build_model()
-    segments, info = model.transcribe(wav, language="zh",
-                                      initial_prompt=prompt, **extra_kw)
-    # join/strip 与 voice-ptt.py 转写路径同构
-    text = "".join(s.text for s in segments).strip()
+    with vad_trim.trimmed_wav(wav) as src:
+        if src is None:
+            print("[voice-input] vad: no speech, empty transcript", file=sys.stderr)
+            print("")
+            return 0
+        segments, info = model.transcribe(src, language="zh",
+                                          initial_prompt=prompt, **extra_kw)
+        text = "".join(s.text for s in segments).strip()
     print(text)
     return 0
 

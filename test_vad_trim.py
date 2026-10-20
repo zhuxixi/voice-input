@@ -151,3 +151,12 @@ class TestSpeechSpans(unittest.TestCase):
         self.assertEqual(fake.call_args.kwargs["sampling_rate"], SR)
         self.assertEqual(options.speech_pad_ms, vad_trim.DEFAULT_PAD_MS)
         self.assertEqual(options.min_speech_duration_ms, 0)
+
+
+class TestWiring(unittest.TestCase):
+    def test_cli_call_sites_use_trimmed_wav(self):
+        root = os.path.dirname(os.path.abspath(__file__))
+        for name in ("transcribe_once.py", "voice-ptt.py"):
+            with open(os.path.join(root, name), encoding="utf-8") as fh:
+                source = fh.read()
+            self.assertIn("vad_trim.trimmed_wav(", source, name)
