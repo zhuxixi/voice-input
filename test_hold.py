@@ -183,8 +183,11 @@ class _FakeMonitor:
 
 
 class _FakeDisplay:
+    def __init__(self):
+        self.monitor = _FakeMonitor()
+
     def get_primary_monitor(self):
-        return _FakeMonitor()
+        return self.monitor
 
 
 class _FakeGdkWindow:
@@ -204,6 +207,7 @@ class _FakeWin:
         self.realized = False
         self.gdk = _FakeGdkWindow()
         self.destroyed = False
+        self.display = _FakeDisplay()
 
     def set_decorated(self, v): self.calls.append(("set_decorated", v))
     def set_keep_above(self, v): self.calls.append(("set_keep_above", v))
@@ -216,7 +220,7 @@ class _FakeWin:
     def hide(self): self.calls.append(("hide",))
     def destroy(self): self.destroyed = True
     def get_window(self): return self.gdk if self.realized else None
-    def get_display(self): return _FakeDisplay()
+    def get_display(self): return self.display
 
 
 class _FakeGtk:
@@ -265,6 +269,7 @@ class _FakeLayerShell:
     def set_layer(self, win, layer): self.calls.append(("set_layer", layer))
     def set_keyboard_mode(self, win, mode): self.calls.append(("set_keyboard_mode", mode))
     def set_namespace(self, win, ns): self.calls.append(("set_namespace", ns))
+    def set_monitor(self, win, monitor): self.calls.append(("set_monitor", monitor))
     def set_anchor(self, win, edge, on): self.calls.append(("set_anchor", edge, on))
     def set_margin(self, win, edge, margin): self.calls.append(("set_margin", edge, margin))
     def set_exclusive_zone(self, win, zone): self.calls.append(("set_exclusive_zone", zone))
@@ -288,6 +293,7 @@ class TestOverlayLayerShell(unittest.TestCase):
         self.assertIn(("set_layer", 2), ls.calls)
         self.assertIn(("set_keyboard_mode", 0), ls.calls)
         self.assertIn(("set_namespace", "voice-hold-overlay"), ls.calls)
+        self.assertIn(("set_monitor", win.get_display().get_primary_monitor()), ls.calls)
         self.assertIn(("set_anchor", 0, True), ls.calls)
         self.assertIn(("set_anchor", 1, True), ls.calls)
         self.assertIn(("set_margin", 0, (1920 - 160) // 2), ls.calls)

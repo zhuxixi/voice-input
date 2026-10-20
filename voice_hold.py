@@ -293,7 +293,9 @@ class _Overlay:
             if display is None:
                 from gi.repository import Gdk
                 display = Gdk.Display.get_default()
-            geom = display.get_primary_monitor().get_geometry()
+            monitor = display.get_primary_monitor()
+            ls.set_monitor(win, monitor)
+            geom = monitor.get_geometry()
             ls.set_anchor(win, ls.Edge.LEFT, True)
             ls.set_anchor(win, ls.Edge.TOP, True)
             ls.set_margin(win, ls.Edge.LEFT, (geom.width - OVERLAY_W) // 2)

@@ -98,9 +98,11 @@ try:
     GtkLayerShell.set_layer(win, GtkLayerShell.Layer.OVERLAY)
     GtkLayerShell.set_keyboard_mode(win, GtkLayerShell.KeyboardMode.NONE)
     GtkLayerShell.set_namespace(win, "voice-hold-overlay")
-    # 居中：按主显示器逻辑几何 + 固定窗口尺寸算边距，锚 LEFT+TOP
+    # 居中：先显式绑定主显示器，再按同一显示器的逻辑几何 + 固定窗口尺寸算边距，锚 LEFT+TOP
     display = win.get_display() or Gdk.Display.get_default()
-    geom = display.get_primary_monitor().get_geometry()
+    monitor = display.get_primary_monitor()
+    GtkLayerShell.set_monitor(win, monitor)
+    geom = monitor.get_geometry()
     GtkLayerShell.set_anchor(win, GtkLayerShell.Edge.LEFT, True)
     GtkLayerShell.set_anchor(win, GtkLayerShell.Edge.TOP, True)
     GtkLayerShell.set_margin(win, GtkLayerShell.Edge.LEFT,
@@ -115,6 +117,10 @@ except Exception:
 （`Gdk` 从 `gi.repository` 取；`OVERLAY_W/H` 落为模块常量。不引入 `python-cairo`：部署解释器
 `/usr/bin/python3`（service:11）上 `import cairo` 实测 ModuleNotFoundError，且 `gi.repository.cairo.Region`
 的 boxed 不可直接实例化。）
+
+- 浮层显式绑定到主显示器（`set_monitor(win, monitor)`，与算居中边距用的是同一个 monitor）：
+  layer-shell 协议下未绑定 output 由合成器自选，多显示器时会落到非主屏导致偏离中心；
+  显式绑定使多显示器行为确定（仍只支持主屏，见 §2.6 非目标）。
 
 指针穿透必须在窗口 **realize 之后**设置：`_try_init()` 阶段 `win.get_window()` 为 `None`，
 硬设会被上面的 `except Exception: pass` 吞掉，真实路径静默失去穿透（A2 用宽松假件还会全绿）。
@@ -209,7 +215,7 @@ systemd 单元 `contrib/voice-hold.service:11` 的 `ExecStart` 指向主 checkou
 | ID | 功能点 | 验收方式 | 具体验证 | 通过标准 |
 |----|--------|----------|----------|----------|
 | A1 | 状态机纯函数 | 自动化（unit） | `python3 -m unittest test_hold.TestFeedbackTransition -v` 新增：全部 6 条显式转移 + 未知事件保持 | 断言通过；未知事件返回 `(state, None)` |
-| A2 | layer-shell 初始化与回退 | 自动化（unit，注入假 Gtk/GtkLayerShell 模块） | `python3 -m unittest test_hold.TestOverlayLayerShell -v` 新增：调用顺序/参数（OVERLAY、keyboard NONE、namespace、anchors、margins、exclusive 0）；假 win 复现 realize 时序（`get_window()` 在 `show_all()` 前返回 None、之后返回记录器），断言 `_apply_ptr_passthrough` 在 `show_all()` 后调用 `set_pass_through(True)` 且未 realize 时不崩；**穿透调用抛异常时只输出一行 stderr、`_dead` 保持 False、后续 `show()` 仍正常**；`is_supported()` False 或注入的 layer-shell stub 抛异常时回退普通窗口且 `_inited=True` | 断言通过；回退路径不抛异常；穿透失败不丢浮层 |
+| A2 | layer-shell 初始化与回退 | 自动化（unit，注入假 Gtk/GtkLayerShell 模块） | `python3 -m unittest test_hold.TestOverlayLayerShell -v` 新增：调用顺序/参数（OVERLAY、keyboard NONE、namespace、set_monitor(primary monitor)、anchors、margins、exclusive 0）；假 win 复现 realize 时序（`get_window()` 在 `show_all()` 前返回 None、之后返回记录器），断言 `_apply_ptr_passthrough` 在 `show_all()` 后调用 `set_pass_through(True)` 且未 realize 时不崩；**穿透调用抛异常时只输出一行 stderr、`_dead` 保持 False、后续 `show()` 仍正常**；`is_supported()` False 或注入的 layer-shell stub 抛异常时回退普通窗口且 `_inited=True` | 断言通过；回退路径不抛异常；穿透失败不丢浮层 |
 | A3 | 事件迭代器 `iter_events` | 自动化（unit，fake dev + fake select） | `python3 -m unittest test_hold.TestIterEvents -v` 新增：超时返回 `[]`；就绪时读完全部 pending；OSError 原样传播 | 断言通过 |
 | A4 | 工作线程通道 + `_tick` | 自动化（unit/integration，overlay Mock） | `python3 -m unittest test_hold.TestDeliverTick -v` 新增：`_deliver` 的 ok/fail/异常路径均投递且 `busy=False`；**paste 失败/超时投递 fail 且不显示 DONE**；`_tick` 消费队列并驱动 `feedback_transition`；DONE 超时触发 `done_timeout`；`overlay.show` 抛异常 → `_disable` 后 `_tick` 不抛、后续空转；`handle_key_value` 投递侧：press/release 后状态机事件队列收到 `start`/`stop`（队列可注入）；单队列跨生产者顺序：先投 `stop` 再投 `ok`，两次 `_tick` 后状态为 `done`；`stop_recording` 不再直调 overlay | 断言通过 |
 | A5 | 回归 | 自动化（integration） | README.md:386 的 9 模块全量命令 | 全绿 |
@@ -227,9 +233,10 @@ U1/U2 合并前必须通过；U3 允许合并后补验（自动化 A2 已覆盖�
 - **A2 边界（unit）**：`_Overlay` 构造签名增加可选注入
   `_Overlay(gtk_module=None, layer_shell_module=None)`；默认 None 时保持现有 lazy import
   （构造零 GTK 副作用，`TestOverlayLazyInit` 继续通过）。测试用假模块记录调用并断言
-  参数（假模块需带 `Layer`/`KeyboardMode`/`Edge` 常量与 `is_supported()`；假 win 复现
+  参数（假模块需带 `Layer`/`KeyboardMode`/`Edge` 常量与 `is_supported()`，并记录
+  `set_monitor(primary monitor)`；假 win 复现
   真实 realize 时序：`get_window()` 在 `show_all()` 前返回 None、之后返回假 gdk window；
-  假 win 另提供 `get_display()` → 假 display（`get_primary_monitor()` → 假 monitor
+  假 win 另提供 `get_display()` → 假 display（缓存同一实例；`get_primary_monitor()` → 缓存的假 monitor
   （`get_geometry()` → 带 width/height 的对象）），使居中链路全程走假件；假 gdk window
   记录 `set_pass_through(True)` 调用且可配置 `side_effect` 抛异常），不启动真实 GTK 主循环。
 - **A3 边界（unit）**：`iter_events(dev, timeout, select_fn)` 把 select 与设备都做成参数；
