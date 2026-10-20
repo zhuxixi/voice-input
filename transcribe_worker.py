@@ -20,11 +20,11 @@ _REPO_DIR = os.path.dirname(os.path.realpath(__file__))
 if _REPO_DIR not in sys.path:
     sys.path.insert(0, _REPO_DIR)
 
+import vad_trim
 from terms import (DEFAULT_TERMS_PATH, build_prompt, build_transcribe_kwargs,
                    load_terms)
 from worker_protocol import (ProtocolError, encode_error, encode_ready, encode_text,
                              parse_line)
-import vad_trim
 
 
 def parse_args(argv):

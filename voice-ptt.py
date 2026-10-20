@@ -48,10 +48,10 @@ except ValueError as e:
 import threading
 import time
 import signal
+import vad_trim
 from archive import archive_recording, ARCHIVE_ENABLED
 from media_pause import pause_playing, resume, PAUSE_MEDIA_ENABLED
 from terms import load_terms, build_prompt, build_transcribe_kwargs
-import vad_trim
 import gi
 
 gi.require_version("Gtk", "3.0")

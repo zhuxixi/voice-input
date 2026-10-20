@@ -1,4 +1,4 @@
-"""A1-A6b (#32): silence trimming for transcription."""
+"""A1-A9 (#32): silence trimming for transcription."""
 
 import os
 import shutil
@@ -78,8 +78,11 @@ class TestTrimmedWav(unittest.TestCase):
 
     def test_env_disable_passthrough(self):
         with mock.patch.dict(os.environ, {vad_trim.ENV_VAD: "0"}):
-            with vad_trim.trimmed_wav(self.wav, log=self.log) as src:
+            with vad_trim.trimmed_wav(self.wav,
+                                      detector=self.detector([(4000, 12000)]),
+                                      log=self.log) as src:
                 self.assertEqual(src, self.wav)
+        self.assertEqual(self.logs, [])
 
     def test_trim_creates_and_removes_temp(self):
         before = read_frames(self.wav)
@@ -92,6 +95,7 @@ class TestTrimmedWav(unittest.TestCase):
                 self.assertEqual(w.getnframes(), 8000)
         self.assertFalse(os.path.exists(src))
         self.assertEqual(read_frames(self.wav), before)
+        self.assertIn("vad: 1.00s -> 0.50s (1 span)", "\n".join(self.logs))
 
     def test_caller_exception_propagates(self):
         spans = [(4000, 12000)]
@@ -104,6 +108,14 @@ class TestTrimmedWav(unittest.TestCase):
         with vad_trim.trimmed_wav(self.wav, detector=self.detector([(0, 16000)]),
                                   log=self.log) as src:
             self.assertEqual(src, self.wav)
+        self.assertEqual([p for p in os.listdir(self.dir)
+                          if p.startswith("voice-input-trim-")], [])
+        with vad_trim.trimmed_wav(self.wav, detector=self.detector([(0, 15856)]),
+                                  log=self.log) as src:
+            self.assertEqual(src, self.wav)
+        with vad_trim.trimmed_wav(self.wav, detector=self.detector([(0, 15680)]),
+                                  log=self.log) as src:
+            self.assertNotEqual(src, self.wav)
         with vad_trim.trimmed_wav(self.wav, detector=self.detector([(0, 15000)]),
                                   log=self.log) as src:
             self.assertNotEqual(src, self.wav)
@@ -149,7 +161,7 @@ class TestSpeechSpans(unittest.TestCase):
         self.assertEqual(audio.dtype, np.float32)
         self.assertAlmostEqual(float(audio[0]), 1000 / 32768.0, places=6)
         self.assertEqual(fake.call_args.kwargs["sampling_rate"], SR)
-        self.assertEqual(options.speech_pad_ms, vad_trim.DEFAULT_PAD_MS)
+        self.assertEqual(options.speech_pad_ms, 400)
         self.assertEqual(options.min_speech_duration_ms, 0)
 
 
@@ -160,3 +172,4 @@ class TestWiring(unittest.TestCase):
             with open(os.path.join(root, name), encoding="utf-8") as fh:
                 source = fh.read()
             self.assertIn("vad_trim.trimmed_wav(", source, name)
+            self.assertNotIn("transcribe(wav", source, name)

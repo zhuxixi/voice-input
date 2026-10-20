@@ -37,7 +37,7 @@ def span_bounds(spans, total_samples):
     return bounds
 
 
-def speech_spans(frames, sample_rate=SAMPLE_RATE, vad_options=None):
+def speech_spans(frames, sample_rate=SAMPLE_RATE, *, vad_options=None):
     """Silero VAD spans (sample indices) for 16-bit mono PCM frames."""
     import numpy as np
     from faster_whisper.vad import VadOptions, get_speech_timestamps
@@ -110,11 +110,17 @@ def trimmed_wav(path, *, detector=None, enabled=None, log=None):
         return
 
     total = len(frames) // 2
-    bounds = span_bounds(spans, total)
+    try:
+        bounds = span_bounds(spans, total)
+        kept = sum(stop - start for start, stop in bounds)
+    except Exception as exc:
+        log(f"[voice-input] vad: error ({type(exc).__name__}: {exc}), "
+            "using original audio")
+        yield path
+        return
     if not bounds:
         yield None
         return
-    kept = sum(stop - start for start, stop in bounds)
     if kept >= total * 0.99:
         yield path
         return

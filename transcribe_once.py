@@ -41,9 +41,9 @@ if not _SITE or not os.path.isdir(_SITE):
     sys.exit(1)
 
 import engine  # 顶层纯标准库(#16);preamble 计算收敛到 engine 单点(#19 债①)
+import vad_trim
 from terms import (DEFAULT_TERMS_PATH, build_prompt, build_transcribe_kwargs,
                    load_terms)
-import vad_trim
 
 try:
     _ENG = engine.engine_name(dict(os.environ))
