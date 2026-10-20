@@ -4,6 +4,7 @@ Drafted: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-20T22:59:28+08:00（round 1 处置）
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-20T23:08:26+08:00（round 2 处置）
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-20T23:16:50+08:00（round 3 处置，细化项）
+Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-20T23:20:02+08:00（收敛后事实修正：test_engine 在系统 Python 下本就红，A11 拆分）
 
 Issue: https://github.com/zhuxixi/voice-input/issues/32
 Umbrella 关联：#14（不在本 issue 范围）
@@ -142,7 +143,8 @@ worker 日志走 journal，X11 走 stderr，沿用现有通道。
 | A8 | worker 接线：裁剪路径传给模型 | 自动化（integration，fake model） | `python3 -m unittest test_transcribe_worker.TestVadWiring.test_trimmed_path_reaches_model -v` | fake model 收到的 wav 路径来自 `trimmed_wav` |
 | A9 | X11 / test-mic 入口接线 | 自动化（static，stdlib） | `python3 -m unittest test_vad_trim.TestWiring -v`（读源码断言调用点） | `transcribe_once.py` 与 `voice-ptt.py` 均含 `vad_trim.trimmed_wav(` |
 | A10 | 真实音频 E2E（NPU） | 自动化（automated E2E，三条件 skipUnless） | `LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu VOICE_INPUT_ENGINE=npu venv/bin/python3 -m unittest test_vad_trim.TestEndToEnd -v`；skip 谓词 = 复现音频存在 **且** `import numpy, faster_whisper, openvino_genai` 成功 **且** `VOICE_INPUT_ENGINE=npu` | 输出不含「词曲 李宗盛」「字幕」「Zither」；「这个」≤ 8 |
-| A11 | 全仓回归（系统 Python） | 自动化（unit，stdlib） | `python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim test_engine -v` | 全绿；`TestEndToEnd` 与 `TestSpeechSpans` 因 skip 谓词不满足而 skip（不红）；`test_engine` 锁住 CUDA 契约 |
+| A11a | 全仓回归（系统 Python，stdlib 套件） | 自动化（unit，stdlib） | `python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim -v` | 全绿；`TestEndToEnd` 与 `TestSpeechSpans` 因 skip 谓词不满足而 skip（不红） |
+| A11b | 引擎契约回归（venv Python） | 自动化（unit，venv） | `venv/bin/python3 -m unittest test_engine -v` | 全绿，锁住 `engine.py` CUDA 默认契约（实测系统 Python 跑该模块 8 个 numpy 用例必红，故拆分） |
 | U1 | 真机正常听写不退化 | 用户实测 | 合并后在主 checkout `systemctl --user restart voice-hold`；正常音量说 3 句不带长停顿；再按住不说话 2s 松开 | 3 句文本与改动前同义、无丢字；空按键**不产生任何文本**；`journalctl` 出现 `vad:` 行；主观延迟无退化 |
 | U2 | 长停顿样本不再幻觉 | 用户实测 | 同一服务下，按住说一句 → 停 5s → 再说一句 → 松开 | 输出无「词曲 李宗盛」「字幕…」「Zither」；两句内容都在 |
 | U3 | 多停顿句读可接受 | 用户实测 | 一段包含 2 次以上 ≥2s 停顿的口述 | 内容完整；允许句读合并（预期取舍），不接受丢句 |
@@ -155,7 +157,7 @@ worker 日志走 journal，X11 走 stderr，沿用现有通道。
 
 - 代码从 worktree 出 PR；合并前只能跑自动化（A1–A11），**U1–U4 必须在合并后主 checkout 上执行**（systemd 单元 `ExecStart` 指向主 checkout，见 `contrib/voice-hold.service`；worktree 代码不会被服务加载）。
 - U5 需要 X11 机器，本 session 不可执行，合并前在 PR 中标记 pending。
-- 两份 README（`README.md` + `README.zh-CN.md`）同步：配置表新增 `VOICE_INPUT_VAD`，Testing 行加入 `test_vad_trim` 并补上历史缺漏的 `test_engine`，NPU/Wayland 段落各补一句裁剪行为（与 #20 无冲突，只改相关行）。
+- 两份 README（`README.md` + `README.zh-CN.md`）同步：配置表新增 `VOICE_INPUT_VAD`，Testing 行加入 `test_vad_trim`（系统 Python 套件）并单列 `venv/bin/python3 -m unittest test_engine -v`（引擎契约，需 venv），NPU/Wayland 段落各补一句裁剪行为（与 #20 无冲突，只改相关行）。
 
 ## 7. 风险与缓解
 
