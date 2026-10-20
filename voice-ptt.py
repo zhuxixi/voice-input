@@ -48,6 +48,7 @@ except ValueError as e:
 import threading
 import time
 import signal
+import vad_trim
 from archive import archive_recording, ARCHIVE_ENABLED
 from media_pause import pause_playing, resume, PAUSE_MEDIA_ENABLED
 from terms import load_terms, build_prompt, build_transcribe_kwargs
@@ -247,13 +248,19 @@ def stop_recording():
             print(f"[voice-input] terms assemble failed, degrade to no-prompt: {te}", file=sys.stderr)
             prompt = None
             extra_kw = {}
-        segments, info = m.transcribe(
-            wav,
-            language="zh",
-            initial_prompt=prompt,
-            **extra_kw,
-        )
-        text = "".join(s.text for s in segments).strip()
+        with vad_trim.trimmed_wav(wav) as src:
+            if src is None:
+                print("[voice-input] vad: no speech, empty transcript",
+                      file=sys.stderr)
+                text = ""
+            else:
+                segments, info = m.transcribe(
+                    src,
+                    language="zh",
+                    initial_prompt=prompt,
+                    **extra_kw,
+                )
+                text = "".join(s.text for s in segments).strip()
     except Exception as e:
         print(f"[voice-input] Error: {e}", file=sys.stderr)
         text = ""

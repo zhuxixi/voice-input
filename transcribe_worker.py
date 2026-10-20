@@ -20,6 +20,7 @@ _REPO_DIR = os.path.dirname(os.path.realpath(__file__))
 if _REPO_DIR not in sys.path:
     sys.path.insert(0, _REPO_DIR)
 
+import vad_trim
 from terms import (DEFAULT_TERMS_PATH, build_prompt, build_transcribe_kwargs,
                    load_terms)
 from worker_protocol import (ProtocolError, encode_error, encode_ready, encode_text,
@@ -102,9 +103,14 @@ def worker_main(conn, *, model_factory=None, terms_loader=load_terms,
                 extra_kw = build_transcribe_kwargs(cfg)
             except Exception as te:        # degrade, never block transcription
                 log(f"[worker] terms assemble failed, degrade to no-prompt: {te}")
-            segments, _info = model.transcribe(wav, language="zh",
-                                               initial_prompt=prompt, **extra_kw)
-            text = "".join(s.text for s in segments).strip()
+            with vad_trim.trimmed_wav(wav) as src:
+                if src is None:
+                    log("[voice-input] vad: no speech, empty transcript")
+                    text = ""
+                else:
+                    segments, _info = model.transcribe(
+                        src, language="zh", initial_prompt=prompt, **extra_kw)
+                    text = "".join(s.text for s in segments).strip()
             conn.write(encode_text(rid, text))
         except Exception as e:             # worker stays alive (spec §4.4)
             conn.write(encode_error(rid, f"{type(e).__name__}: {e}"))

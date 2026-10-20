@@ -151,6 +151,9 @@ systemctl --user enable --now voice-hold.service
 - If you created a KDE custom shortcut for `voice-toggle.sh` on the same key,
   delete it — otherwise both fire.
 - `voice-toggle.sh` still works as a tap-twice alternative via the same backend.
+- Silence trimming (#32): only VAD-detected speech reaches Whisper, so leading,
+  trailing and long internal silence no longer caused the classic
+  "词曲 李宗盛" / "字幕by索兰娅" hallucinations. `VOICE_INPUT_VAD=0` disables it.
 
 Known limitations (Wayland):
 
@@ -194,6 +197,7 @@ All settings with their defaults and how to change them:
 | `VOICE_INPUT_WAYLAND_METHOD` | `paste` | Wayland text delivery: `paste` = clipboard paste (`wl-copy` + `ydotool` combo), `type` = simulated typing | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_WAYLAND_METHOD=type` |
 | `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | Paste key combo for the Wayland paste method (terminal convention; use `ctrl+v` for apps like VS Code that only bind plain paste) | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_PASTE_COMBO=ctrl+v` |
 | `VOICE_INPUT_RESIDENT` | `1` (on) | Keep a resident transcription worker: the model stays loaded across dictations (prewarmed at daemon start). `0` = legacy per-dictation spawn (model reloaded every dictation) | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_RESIDENT=0` |
+| `VOICE_INPUT_VAD` | `1` (on) | Trim leading/trailing and long internal silence before transcription (Silero VAD bundled with faster-whisper), so Whisper never decodes silence. `0` = legacy behavior | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_VAD=0` |
 
 ### NPU engine (Intel AI Boost, e.g. Lunar Lake)
 
@@ -242,6 +246,9 @@ Notes:
   ~155s cold compile inside the dictation — the compile happens at daemon
   startup instead. `bench/hold-latency.py` measures both paths (resident vs the
   legacy per-dictation spawn).
+- Silence trimming (#32) runs before the NPU pipeline: only detected speech is
+  handed to `WhisperPipeline`, which also shortens decode time on recordings
+  with long pauses. `VOICE_INPUT_VAD=0` opts out.
 
 ### Custom vocabulary (hotwords)
 
@@ -386,10 +393,13 @@ The author's setup, for reference:
 ## Testing
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim -v
+venv/bin/python3 -m unittest test_engine -v   # engine/CUDA contract (needs numpy in process)
+venv/bin/python3 -m unittest test_vad_trim -v   # VAD cases (TestSpeechSpans / TestEndToEnd)
 ```
 
-The tests use only the standard library and don't touch the GPU.
+The standard-library suite runs under the system interpreter; VAD-dependent
+cases (`TestSpeechSpans`, `TestEndToEnd`) skip there and run under the venv.
 
 ## License
 
