@@ -173,3 +173,37 @@ class TestWiring(unittest.TestCase):
                 source = fh.read()
             self.assertIn("vad_trim.trimmed_wav(", source, name)
             self.assertNotIn("transcribe(wav", source, name)
+
+
+REPRO_WAV = os.path.expanduser(
+    "~/.local/share/voice-input/debug/repro-loop-20260930.wav")
+
+
+def e2e_ready():
+    if not os.path.exists(REPRO_WAV):
+        return False
+    if os.environ.get("VOICE_INPUT_ENGINE") != "npu":
+        return False
+    try:
+        import numpy  # noqa: F401
+        import faster_whisper  # noqa: F401
+        import openvino_genai  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(e2e_ready(), "needs repro wav + npu deps + VOICE_INPUT_ENGINE=npu")
+class TestEndToEnd(unittest.TestCase):
+    def test_repro_has_no_silence_hallucination(self):
+        import subprocess
+        import sys
+        root = os.path.dirname(os.path.abspath(__file__))
+        result = subprocess.run(
+            [sys.executable, os.path.join(root, "transcribe_once.py"), REPRO_WAV],
+            capture_output=True, text=True, timeout=300)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = result.stdout.strip()
+        for marker in ("词曲", "字幕", "Zither"):
+            self.assertNotIn(marker, text)
+        self.assertLessEqual(text.count("这个"), 8)
