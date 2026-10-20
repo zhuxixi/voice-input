@@ -395,6 +395,7 @@ The author's setup, for reference:
 ```bash
 python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim -v
 venv/bin/python3 -m unittest test_engine -v   # engine/CUDA contract (needs numpy in process)
+venv/bin/python3 -m unittest test_vad_trim -v   # VAD cases (TestSpeechSpans / TestEndToEnd)
 ```
 
 The standard-library suite runs under the system interpreter; VAD-dependent

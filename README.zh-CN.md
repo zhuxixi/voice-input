@@ -324,6 +324,7 @@ worker 挂死会在 `VOICE_INPUT_TRANSCRIBE_TIMEOUT` 被杀并在下一次听写
 ```bash
 python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim -v
 venv/bin/python3 -m unittest test_engine -v   # 引擎/CUDA 契约（需要进程内有 numpy）
+venv/bin/python3 -m unittest test_vad_trim -v   # VAD 用例（TestSpeechSpans / TestEndToEnd）
 ```
 
 标准库套件用系统 Python 跑；依赖 VAD 的用例（`TestSpeechSpans`、`TestEndToEnd`）

@@ -1,4 +1,4 @@
-"""A1-A9 (#32): silence trimming for transcription."""
+"""A1-A10 (#32): silence trimming for transcription."""
 
 import os
 import shutil
@@ -75,6 +75,7 @@ class TestTrimmedWav(unittest.TestCase):
         with vad_trim.trimmed_wav(self.wav, detector=explode, enabled=False,
                                   log=self.log) as src:
             self.assertEqual(src, self.wav)
+        self.assertEqual(self.logs, [])
 
     def test_env_disable_passthrough(self):
         with mock.patch.dict(os.environ, {vad_trim.ENV_VAD: "0"}):
@@ -99,10 +100,13 @@ class TestTrimmedWav(unittest.TestCase):
 
     def test_caller_exception_propagates(self):
         spans = [(4000, 12000)]
+        seen = []
         with self.assertRaises(ValueError):
             with vad_trim.trimmed_wav(self.wav, detector=self.detector(spans),
                                       log=self.log) as src:
+                seen.append(src)
                 raise ValueError("caller boom")
+        self.assertFalse(os.path.exists(seen[0]))
 
     def test_near_full_length_passthrough(self):
         with vad_trim.trimmed_wav(self.wav, detector=self.detector([(0, 16000)]),
@@ -119,6 +123,15 @@ class TestTrimmedWav(unittest.TestCase):
         with vad_trim.trimmed_wav(self.wav, detector=self.detector([(0, 15000)]),
                                   log=self.log) as src:
             self.assertNotEqual(src, self.wav)
+
+    def test_write_failure_falls_back(self):
+        with mock.patch.object(vad_trim, "_write_trimmed",
+                               side_effect=OSError("disk full")):
+            with vad_trim.trimmed_wav(self.wav,
+                                      detector=self.detector([(4000, 12000)]),
+                                      log=self.log) as src:
+                self.assertEqual(src, self.wav)
+        self.assertIn("vad: error", "\n".join(self.logs))
 
     def test_no_speech_yields_none(self):
         with vad_trim.trimmed_wav(self.wav, detector=self.detector([]),
