@@ -132,6 +132,8 @@ systemctl --user enable --now voice-hold.service
   期间的新按键被丢弃，不排队）。
 - 如果之前给 `voice-toggle.sh` 绑过同键的 KDE 自定义快捷键，请删掉——否则会双触发。
 - `voice-toggle.sh` 仍是可用的「点两下」备选模式，走同一个后端。
+- 转写前会裁掉静音（#32）：只有 VAD 判定为语音的部分进入 Whisper，不再出现
+  「词曲 李宗盛」「字幕by索兰娅」这类静音幻觉。`VOICE_INPUT_VAD=0` 可关闭。
 
 已知限制（Wayland）：
 
@@ -169,6 +171,7 @@ systemctl --user enable --now voice-hold.service
 | `VOICE_INPUT_WAYLAND_METHOD` | `paste` | Wayland 上屏方式：`paste` = 剪贴板粘贴（`wl-copy` + `ydotool` 组合键），`type` = 模拟打字 | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_WAYLAND_METHOD=type` |
 | `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | paste 方式的组合键（终端惯例；VS Code 等只认 `ctrl+v` 的应用改这个） | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_PASTE_COMBO=ctrl+v` |
 | `VOICE_INPUT_RESIDENT` | `1`（开） | 常驻转写 worker：模型跨听写常驻（daemon 启动即预热）。`0` = 退回旧的每次听写 spawn（每次都重新加载模型） | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_RESIDENT=0` |
+| `VOICE_INPUT_VAD` | `1`（开） | 转写前用 Silero VAD（模型随 faster-whisper 分发）裁掉首尾与段内长静音，避免 Whisper 解码静音。`0` = 旧行为 | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_VAD=0` |
 
 ### NPU 引擎（Intel AI Boost，如 Lunar Lake）
 
@@ -195,7 +198,8 @@ voice_hold 会自动注入；手工跑 CLI 需自己 export）。
 transcribe_once.py 自动吃到词表。常驻转写 worker（#25）让模型跨听写复用：daemon
 启动即预热，每次听写省下约 1.0–1.45s 的模型加载；清空编译缓存后的首次听写也不再
 在听写内部付 ~155s 冷编译（编译挪到 daemon 启动期）。`bench/hold-latency.py`
-可分别测两条路径（常驻 vs 旧的每次 spawn）。
+可分别测两条路径（常驻 vs 旧的每次 spawn）。转写前会先裁静音（#32）：只有检测到的
+语音会送进 `WhisperPipeline`，长停顿录音的解码时间也随之缩短。`VOICE_INPUT_VAD=0` 关闭该行为。
 
 ### 自定义词汇（热词）
 
@@ -318,10 +322,12 @@ worker 挂死会在 `VOICE_INPUT_TRANSCRIBE_TIMEOUT` 被杀并在下一次听写
 ## 测试
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim -v
+venv/bin/python3 -m unittest test_engine -v   # 引擎/CUDA 契约（需要进程内有 numpy）
 ```
 
-测试仅用标准库，不依赖 GPU。
+标准库套件用系统 Python 跑；依赖 VAD 的用例（`TestSpeechSpans`、`TestEndToEnd`）
+在该解释器下 skip，改用 venv 跑。
 
 ## License
 

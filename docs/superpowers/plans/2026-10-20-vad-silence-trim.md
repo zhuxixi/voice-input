@@ -649,7 +649,8 @@ Silence is trimmed before transcription (#32): only VAD-detected speech reaches 
 Replace the Testing command with:
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim test_engine -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim -v
+venv/bin/python3 -m unittest test_engine -v   # engine/CUDA contract (needs numpy in process)
 ```
 
 - [ ] **Step 2: Mirror all three edits in `README.zh-CN.md`**
@@ -666,24 +667,28 @@ python3 -m unittest test_terms test_archive test_media_pause test_bench test_pas
 转写前会裁掉静音（#32）：只有 VAD 判定为语音的部分进入 Whisper，消除「词曲 李宗盛」「字幕by索兰娅」这类静音幻觉。`VOICE_INPUT_VAD=0` 可关闭。
 ```
 
-Testing 命令与英文版同一行（追加 `test_vad_trim test_engine`）。
+Testing 命令与英文版同一行（追加 `test_vad_trim`，并单列 `venv/bin/python3 -m unittest test_engine -v`）。
 
-- [ ] **Step 3: Run the full regression suite (system python)**
+- [ ] **Step 3: Run the full regression suite**
 
 Run:
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim test_engine -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim -v
+venv/bin/python3 -m unittest test_engine -v
 ```
-Expected: PASS; `TestSpeechSpans` and `TestEndToEnd` are skipped (no numpy in system python).
+Expected: both PASS; `TestSpeechSpans` and `TestEndToEnd` are skipped in the system-python run (no numpy in that interpreter).
+
+> Ruling (post-convergence fact correction): `test_engine` cannot run under system python (8 numpy errors in the main checkout), so A11 is split into A11a (stdlib suite) and A11b (venv engine contract).
 
 - [ ] **Step 4: Verify the two language versions stay in sync**
 
 Run:
 ```bash
 rg -n 'VOICE_INPUT_VAD' README.md README.zh-CN.md
-rg -n 'test_vad_trim test_engine' README.md README.zh-CN.md
+rg -n 'test_vad_trim' README.md README.zh-CN.md
+rg -n 'test_engine' README.md README.zh-CN.md
 ```
-Expected: each file returns the new config row and the updated testing command.
+Expected: each file returns the new config row, the updated testing command, and the venv engine-contract line.
 
 - [ ] **Step 5: Commit**
 
