@@ -47,6 +47,8 @@ Linux 语音输入工具 — 按住快捷键录音，松开即转写并输入到
 - ALSA（`arecord`）+ PipeWire（采集走系统默认音源）
 - `xdotool`, `xsel`
 - GTK3（`gi`，系统 Python）
+- `gtk-layer-shell`（Arch `extra`，0.10.1 在 KDE Plasma 6.7.5 实测）——让 hold
+  浮层盖住全屏窗口。未安装或非 Wayland 会话会静默回退普通窗口。
 - faster-whisper + ctranslate2、pynput（装在 venv）
 
 ## 安装

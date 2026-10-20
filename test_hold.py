@@ -2,11 +2,13 @@ import contextlib
 import engine
 import io
 import os
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -56,6 +58,38 @@ class TestStateMachine(unittest.TestCase):
                 self.assertEqual(
                     voice_hold.transition(value, True, busy=True),
                     (True, True, None))
+
+
+class TestFeedbackTransition(unittest.TestCase):
+    """A1: pure state machine — six explicit transitions, everything else unchanged."""
+
+    def test_explicit_transitions(self):
+        cases = [
+            ("idle", "start", "recording", "show_rec"),
+            ("recording", "stop", "transcribing", "show_transcribing"),
+            ("transcribing", "ok", "done", "show_done"),
+            ("transcribing", "fail", "idle", "hide"),
+            ("done", "done_timeout", "idle", "hide"),
+            ("done", "start", "recording", "show_rec"),
+        ]
+        for state, event, want_state, want_action in cases:
+            with self.subTest(state=state, event=event):
+                self.assertEqual(
+                    voice_hold.feedback_transition(state, event),
+                    (want_state, want_action))
+
+    def test_everything_else_is_a_noop(self):
+        cases = [
+            ("idle", "ok"), ("idle", "fail"), ("idle", "done_timeout"),
+            ("recording", "start"), ("recording", "ok"), ("recording", "fail"),
+            ("transcribing", "start"), ("transcribing", "stop"),
+            ("done", "stop"), ("done", "ok"),
+            ("idle", "bogus"), ("recording", "bogus"),
+        ]
+        for state, event in cases:
+            with self.subTest(state=state, event=event):
+                self.assertEqual(
+                    voice_hold.feedback_transition(state, event), (state, None))
 
 
 class TestDevicePredicate(unittest.TestCase):
@@ -136,6 +170,174 @@ class TestOverlayLazyInit(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         self.assertEqual(proc.stdout.decode().strip(), "None False False")
+
+
+class _FakeGeom:
+    def __init__(self, width=1920, height=1080):
+        self.width, self.height = width, height
+
+
+class _FakeMonitor:
+    def get_geometry(self):
+        return _FakeGeom()
+
+
+class _FakeDisplay:
+    def __init__(self):
+        self.monitor = _FakeMonitor()
+
+    def get_primary_monitor(self):
+        return self.monitor
+
+
+class _FakeGdkWindow:
+    def __init__(self, fail=False):
+        self.calls = []
+        self.fail = fail
+
+    def set_pass_through(self, value):
+        self.calls.append(value)
+        if self.fail:
+            raise RuntimeError("pass-through unsupported")
+
+
+class _FakeWin:
+    def __init__(self):
+        self.calls = []
+        self.realized = False
+        self.gdk = _FakeGdkWindow()
+        self.destroyed = False
+        self.display = _FakeDisplay()
+
+    def set_decorated(self, v): self.calls.append(("set_decorated", v))
+    def set_keep_above(self, v): self.calls.append(("set_keep_above", v))
+    def set_skip_taskbar_hint(self, v): self.calls.append(("set_skip_taskbar_hint", v))
+    def set_default_size(self, w, h): self.calls.append(("set_default_size", w, h))
+    def add(self, w): self.calls.append(("add", w))
+    def show_all(self):
+        self.calls.append(("show_all",))
+        self.realized = True
+    def hide(self): self.calls.append(("hide",))
+    def destroy(self): self.destroyed = True
+    def get_window(self): return self.gdk if self.realized else None
+    def get_display(self): return self.display
+
+
+class _FakeGtk:
+    class WindowType:
+        TOPLEVEL = 0
+
+    class Window:
+        instances = []
+        def __new__(cls, **kwargs):
+            win = _FakeWin()
+            win.kwargs = kwargs
+            cls.instances.append(win)
+            return win
+
+    class Label:
+        def set_markup(self, markup): self.markup = markup
+
+    def __init__(self):
+        self.pending = False
+
+    def events_pending(self): return self.pending
+    def main_iteration_do(self, blocking): return False
+
+
+class _FakeLayerShell:
+    class Layer:
+        OVERLAY = 2
+
+    class KeyboardMode:
+        NONE = 0
+
+    class Edge:
+        LEFT = 0
+        TOP = 1
+
+    def __init__(self, supported=True, fail_init=False):
+        self.supported = supported
+        self.fail_init = fail_init
+        self.calls = []
+
+    def is_supported(self): return self.supported
+    def init_for_window(self, win):
+        self.calls.append(("init_for_window", win))
+        if self.fail_init:
+            raise RuntimeError("init failed")
+    def set_layer(self, win, layer): self.calls.append(("set_layer", layer))
+    def set_keyboard_mode(self, win, mode): self.calls.append(("set_keyboard_mode", mode))
+    def set_namespace(self, win, ns): self.calls.append(("set_namespace", ns))
+    def set_monitor(self, win, monitor): self.calls.append(("set_monitor", monitor))
+    def set_anchor(self, win, edge, on): self.calls.append(("set_anchor", edge, on))
+    def set_margin(self, win, edge, margin): self.calls.append(("set_margin", edge, margin))
+    def set_exclusive_zone(self, win, zone): self.calls.append(("set_exclusive_zone", zone))
+
+
+class TestOverlayLayerShell(unittest.TestCase):
+    """A2: layer-shell init params, fallback, realize-safe pointer passthrough."""
+
+    def _overlay(self, ls):
+        # Brief passes the _FakeGtk class, but its state/methods are
+        # instance-level; an instance is the module-like fake the tests need.
+        return voice_hold._Overlay(gtk_module=_FakeGtk(), layer_shell_module=ls)
+
+    def test_init_params_and_centering(self):
+        ls = _FakeLayerShell()
+        overlay = self._overlay(ls)
+        overlay._try_init()
+        win = _FakeGtk.Window.instances[-1]
+        self.assertTrue(overlay._layer_shell_active)
+        self.assertEqual(ls.calls[0][0], "init_for_window")
+        self.assertIn(("set_layer", 2), ls.calls)
+        self.assertIn(("set_keyboard_mode", 0), ls.calls)
+        self.assertIn(("set_namespace", "voice-hold-overlay"), ls.calls)
+        self.assertIn(("set_monitor", win.get_display().get_primary_monitor()), ls.calls)
+        self.assertIn(("set_anchor", 0, True), ls.calls)
+        self.assertIn(("set_anchor", 1, True), ls.calls)
+        self.assertIn(("set_margin", 0, (1920 - 160) // 2), ls.calls)
+        self.assertIn(("set_margin", 1, (1080 - 48) // 2), ls.calls)
+        self.assertIn(("set_exclusive_zone", 0), ls.calls)
+
+    def test_passthrough_runs_after_realize_and_retries(self):
+        ls = _FakeLayerShell()
+        overlay = self._overlay(ls)
+        overlay.show("● REC", "#ff5555")
+        win = _FakeGtk.Window.instances[-1]
+        self.assertTrue(win.realized)
+        self.assertEqual(win.gdk.calls, [True])
+        overlay.show("转写中…", "#ffaa00")
+        self.assertEqual(win.gdk.calls, [True, True])  # idempotent retry
+
+    def test_unsupported_compositor_falls_back(self):
+        ls = _FakeLayerShell(supported=False)
+        overlay = self._overlay(ls)
+        overlay._try_init()
+        self.assertTrue(overlay._inited)
+        self.assertFalse(overlay._layer_shell_active)
+        self.assertNotIn("init_for_window", [c[0] for c in ls.calls])
+
+    def test_init_failure_falls_back(self):
+        ls = _FakeLayerShell(fail_init=True)
+        overlay = self._overlay(ls)
+        overlay._try_init()
+        self.assertTrue(overlay._inited)
+        self.assertFalse(overlay._layer_shell_active)
+
+    def test_passthrough_failure_keeps_overlay_alive(self):
+        ls = _FakeLayerShell()
+        overlay = self._overlay(ls)
+        overlay._try_init()
+        win = _FakeGtk.Window.instances[-1]
+        win.gdk.fail = True
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            overlay.show("● REC", "#ff5555")
+            overlay.show("● REC", "#ff5555")
+        self.assertFalse(overlay._dead)
+        self.assertEqual(err.getvalue().count("pointer passthrough unavailable"), 2)
+        self.assertEqual(win.calls.count(("show_all",)), 2)
 
 
 class TestModulePurity(unittest.TestCase):
@@ -259,6 +461,197 @@ class TestBusyDropLogging(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             d.handle_key_value(1)
         self.assertEqual(err.getvalue(), "")
+
+
+class TestIterEvents(unittest.TestCase):
+    """A3: select seam — timeout, ready drain, OSError passthrough."""
+
+    class _Dev:
+        fd = 9
+        def __init__(self, result):
+            self.result = result
+            self.reads = 0
+        def read(self):
+            self.reads += 1
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+
+    def test_timeout_returns_empty(self):
+        dev = self._Dev([object()])
+        self.assertEqual(
+            voice_hold.iter_events(dev, 0.2, lambda r, w, x, t: ([], [], [])), [])
+        self.assertEqual(dev.reads, 0)
+
+    def test_ready_returns_all_pending(self):
+        events = [object(), object()]
+        dev = self._Dev(events)
+        seen = {}
+        def fake_select(r, w, x, t):
+            seen["args"] = (r, t)
+            return (r, [], [])
+        self.assertEqual(voice_hold.iter_events(dev, 0.2, fake_select), events)
+        self.assertEqual(seen["args"], ([9], 0.2))
+
+    def test_blocking_io_returns_empty(self):
+        dev = self._Dev(BlockingIOError())
+        self.assertEqual(
+            voice_hold.iter_events(dev, 0.2, lambda r, w, x, t: (r, [], [])), [])
+
+    def test_oserror_propagates(self):
+        dev = self._Dev(OSError("unplugged"))
+        with self.assertRaises(OSError):
+            voice_hold.iter_events(dev, 0.2, lambda r, w, x, t: (r, [], []))
+
+
+class TestDeliverTick(unittest.TestCase):
+    """A4: single FIFO, paste result mapping, tick application, key dispatch."""
+
+    def _daemon(self):
+        return voice_hold.HoldDaemon(env={})
+
+    def test_paste_and_report_returns_bool(self):
+        d = self._daemon()
+        d._spawn_paste = lambda text: (0, False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(d._paste_and_report("hi"))
+        d._spawn_paste = lambda text: (3, False)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertFalse(d._paste_and_report("hi"))
+        d._spawn_paste = lambda text: (None, True)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertFalse(d._paste_and_report("hi"))
+
+    def test_deliver_posts_ok_only_after_successful_paste(self):
+        d = self._daemon()
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = voice_hold.new_recording_path(tmp)
+            with open(wav, "wb") as f:
+                f.write(b"\0" * 2048)
+            d.wav_path = wav
+            d._transcribe_legacy = lambda path: "hello"
+            d.resident = False
+            with mock.patch.object(d, "_paste_and_report", return_value=True):
+                d._deliver()
+        self.assertEqual(d._ui_queue.get_nowait(), "ok")
+        self.assertFalse(d.busy)
+
+    def test_deliver_posts_fail_when_paste_fails(self):
+        d = self._daemon()
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = voice_hold.new_recording_path(tmp)
+            with open(wav, "wb") as f:
+                f.write(b"\0" * 2048)
+            d.wav_path = wav
+            d._transcribe_legacy = lambda path: "hello"
+            d.resident = False
+            with mock.patch.object(d, "_paste_and_report", return_value=False):
+                d._deliver()
+        self.assertEqual(d._ui_queue.get_nowait(), "fail")
+        self.assertFalse(d.busy)
+
+    def test_deliver_posts_fail_when_transcribe_raises(self):
+        d = self._daemon()
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = voice_hold.new_recording_path(tmp)
+            with open(wav, "wb") as f:
+                f.write(b"\0" * 2048)
+            d.wav_path = wav
+            d.resident = False
+            d._transcribe_legacy = mock.Mock(side_effect=RuntimeError("boom"))
+            with self.assertRaises(RuntimeError):
+                d._deliver()
+        self.assertEqual(d._ui_queue.get_nowait(), "fail")
+        self.assertFalse(d.busy)
+
+    def test_deliver_posts_fail_for_no_speech_and_short_recording(self):
+        d = self._daemon()
+        with tempfile.TemporaryDirectory() as tmp:
+            short = voice_hold.new_recording_path(tmp)
+            d.wav_path = short
+            with contextlib.redirect_stderr(io.StringIO()):
+                d._deliver()
+            self.assertEqual(d._ui_queue.get_nowait(), "fail")
+            wav = voice_hold.new_recording_path(tmp)
+            with open(wav, "wb") as f:
+                f.write(b"\0" * 2048)
+            d.wav_path = wav
+            d._transcribe_legacy = lambda path: ""
+            d.resident = False
+            with contextlib.redirect_stdout(io.StringIO()):
+                d._deliver()
+            self.assertEqual(d._ui_queue.get_nowait(), "fail")
+
+    def test_tick_applies_queue_and_done_timeout(self):
+        d = self._daemon()
+        d.overlay = mock.Mock()
+        d._ui_queue.put("start")
+        d._tick()
+        self.assertEqual(d.feedback_state, "recording")
+        d.overlay.show.assert_called_with("● REC", "#ff5555")
+        d._ui_queue.put("stop")
+        d._tick()
+        self.assertEqual(d.feedback_state, "transcribing")
+        d.overlay.show.assert_called_with("转写中…", "#ffaa00")
+        d._ui_queue.put("ok")
+        d._tick()
+        self.assertEqual(d.feedback_state, "done")
+        d.overlay.show.assert_called_with("DONE", "#55ff55")
+        d._done_deadline = time.monotonic() - 1
+        d._tick()
+        self.assertEqual(d.feedback_state, "idle")
+        d.overlay.hide.assert_called()
+
+    def test_tick_survives_overlay_exception(self):
+        d = self._daemon()
+        d.overlay = mock.Mock()
+        d.overlay.show.side_effect = RuntimeError("dead GTK")
+        d._ui_queue.put("start")
+        d._tick()  # must not raise
+        d.overlay._disable.assert_called_once()
+        self.assertEqual(d.feedback_state, "recording")
+
+    def test_handle_key_value_enqueues_before_starting_worker(self):
+        d = self._daemon()
+        d.overlay = mock.Mock()
+        with mock.patch.object(d, "start_recording") as start:
+            d.handle_key_value(1)
+            start.assert_called_once()
+        self.assertEqual(d._ui_queue.get_nowait(), "start")
+        with mock.patch.object(d, "stop_recording"):
+            d.handle_key_value(0)
+        self.assertEqual(d._ui_queue.get_nowait(), "stop")
+
+    def test_stop_enqueues_stop_before_worker_thread_starts(self):
+        d = self._daemon()
+        d.recording = True
+        seen = []
+        class FakeThread:
+            def __init__(self, target=None, daemon=None):
+                self.target = target
+                self.daemon = daemon
+            def start(self):
+                seen.append(d._ui_queue.get_nowait())
+        with mock.patch.object(voice_hold.threading, "Thread", FakeThread):
+            d.handle_key_value(0)
+        self.assertEqual(seen, ["stop"])
+
+    def test_stop_recording_never_touches_overlay(self):
+        d = self._daemon()
+        d.overlay = mock.Mock()
+        with mock.patch.object(voice_hold.threading, "Thread"):
+            d.stop_recording()
+        self.assertEqual(d.overlay.mock_calls, [])
+
+    def test_busy_key_is_dropped_without_events(self):
+        d = self._daemon()
+        d.busy = True
+        with mock.patch.object(d, "start_recording") as start:
+            d.handle_key_value(1)
+            d.handle_key_value(0)
+            start.assert_not_called()
+        with self.assertRaises(queue.Empty):
+            d._ui_queue.get_nowait()
 
 
 class TestSingletonLock(unittest.TestCase):
