@@ -709,6 +709,15 @@ class TestTranscribeOnceTerms(unittest.TestCase):
         self.assertEqual(m["EXTRA"], "['hotwords']")  # hotwords 列表 join 后透传
         self.assertEqual(m["OUT"], "你好")             # join/strip 走真实代码
 
+    def test_corrections_applied_to_stdout(self):
+        with tempfile.TemporaryDirectory() as root:
+            tp = os.path.join(root, "terms.json")
+            with open(tp, "w", encoding="utf-8") as f:
+                json.dump({"corrections": {"你好": "nihao"}}, f)
+            p, m = self._run_main(tp)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(m["OUT"], "nihao")             # 假模型 ' 你好 ' -> 纠正后上 stdout
+
     def test_missing_terms_degrades_to_no_prompt(self):
         p, m = self._run_main(
             os.path.join(tempfile.gettempdir(), "no-such-terms-27.json"))

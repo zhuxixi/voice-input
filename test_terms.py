@@ -301,5 +301,17 @@ class TestRealTokenizer(unittest.TestCase):
         self.assertIn("token budget", err.getvalue())
 
 
+
+class TestCorrectionsWiring(unittest.TestCase):
+    """#33 A9: voice-ptt 静态接线(GTK 依赖,不做端到端;功能接线由 test_engine 覆盖)。"""
+
+    def test_voice_ptt_uses_corrections_and_raw_final_archive(self):
+        root = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(root, "voice-ptt.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("apply_corrections(", src)
+        self.assertIn("archive_recording(wav, raw_text, final_text)", src)
+
+
 if __name__ == "__main__":
     unittest.main()

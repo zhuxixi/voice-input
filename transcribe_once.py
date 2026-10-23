@@ -5,6 +5,7 @@ test-mic.sh / voice-toggle.sh 的转写入口(#16:收敛原先三处内嵌 CUDA 
 引擎选择因此能到达这两个脚本)。引擎与模型经 VOICE_INPUT_ENGINE /
 VOICE_INPUT_MODEL 选择,默认 cuda + large-v3(契约见 engine.py 模块注释)。
 词表热词(#27): main() 组装 terms.initial_prompt/hotwords,所有引擎统一生效,组装失败降级为无提示转写。
+确定性纠错(#33): terms.json 的 corrections 在 join 后单趟应用到 stdout 文本。
 """
 
 import os
@@ -42,8 +43,8 @@ if not _SITE or not os.path.isdir(_SITE):
 
 import engine  # 顶层纯标准库(#16);preamble 计算收敛到 engine 单点(#19 债①)
 import vad_trim
-from terms import (DEFAULT_TERMS_PATH, build_prompt, build_transcribe_kwargs,
-                   load_terms)
+from terms import (DEFAULT_TERMS_PATH, apply_corrections, build_prompt,
+                   build_transcribe_kwargs, load_terms)
 
 try:
     _ENG = engine.engine_name(dict(os.environ))
@@ -84,8 +85,10 @@ def main(argv=None, terms_path=DEFAULT_TERMS_PATH) -> int:
         cfg = load_terms(terms_path)
         prompt = build_prompt(cfg.get("terms", []))
         extra_kw = build_transcribe_kwargs(cfg)
+        corrections = cfg.get("corrections", {})
     except Exception as te:
         prompt, extra_kw = None, {}
+        corrections = {}
         print(f"[voice-input] terms assemble failed, degrade to no-prompt: {te}",
               file=sys.stderr)
     model = engine.build_model()
@@ -97,6 +100,7 @@ def main(argv=None, terms_path=DEFAULT_TERMS_PATH) -> int:
         segments, info = model.transcribe(src, language="zh",
                                           initial_prompt=prompt, **extra_kw)
         text = "".join(s.text for s in segments).strip()
+        text = apply_corrections(text, corrections)
     print(text)
     return 0
 
