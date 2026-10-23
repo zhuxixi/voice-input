@@ -252,5 +252,54 @@ class TestLoadTermsCorrections(unittest.TestCase):
         self.assertEqual(cfg["corrections"], {"sql": "skill"})
 
 
+
+def _fresh_state():
+    return {"probed": False, "counter": None, "warned": False}
+
+
+def _probe_available():
+    """venv-only:任一探测路径命中 tokenizer.json 且 tokenizers 可导入。"""
+    try:
+        with _mock.patch.object(terms, "_TOKENIZER_STATE", _fresh_state()):
+            return terms._probe_counter() is not None
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(_probe_available(), "no tokenizer.json reachable via probe paths")
+class TestRealTokenizer(unittest.TestCase):
+    """#33 A10:真实 tokenizer 计数(system python 下无 tokenizers -> skip)。"""
+
+    # 复刻 2026-10-21 实测现役词表构成(30 词,~147 token)
+    FIXTURE = ["zima", "jfox", "Claude", "Claude Code", "Kimi", "DeepSeek",
+               "GitHub", "GitHub issue", "issue", "Boktionary", "Wiktionary",
+               "vocabo", "pjob", "pi-coding-agent", "pi", "pi-agent board",
+               "nvim", "skill", "spec", "review", "session", "智谱", "飞书",
+               "永久笔记", "根因", "待确认项", "clear report", "workflow",
+               "闪屏", "OpenVINO"]
+
+    def test_real_fixture_within_budget_no_truncation(self):
+        with _mock.patch.object(terms, "_TOKENIZER_STATE", _fresh_state()):
+            p = terms.build_prompt(self.FIXTURE)
+            n = terms._token_count(p)
+        for w in self.FIXTURE:
+            self.assertIn(w, p)
+        self.assertGreater(n, 100)                  # 区间合理性,不逐字对齐 og.Tokenizer
+        self.assertLessEqual(n, terms.MAX_PROMPT_TOKENS)
+
+    def test_real_60_cjk_words_truncated(self):
+        words = [f"词汇编号{i:02d}" for i in range(60)]
+        with _mock.patch.object(terms, "_TOKENIZER_STATE", _fresh_state()):
+            with _mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                p = terms.build_prompt(words)
+            n = terms._token_count(p)
+        kept = [w for w in words if w in p]
+        self.assertLess(len(kept), 60)
+        self.assertGreater(len(kept), 0)
+        self.assertEqual(kept, words[:len(kept)])   # 词边界 + 保持顺序
+        self.assertLessEqual(n, terms.MAX_PROMPT_TOKENS)
+        self.assertIn("token budget", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
