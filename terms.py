@@ -137,8 +137,8 @@ def build_prompt(terms: list, token_count=_token_count) -> "str | None":
     kept = []
     for term in terms:
         prompt = intro + "、".join([*kept, str(term)]) + "。"
-        n = token_count(prompt) if token_count is not None else None
-        if n is None and token_count is not None:
+        n = None
+        if token_count is not None:
             try:
                 n = token_count(prompt)
             except Exception:

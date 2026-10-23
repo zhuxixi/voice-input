@@ -313,8 +313,6 @@ class TestCorrectionsWiring(unittest.TestCase):
         self.assertIn("archive_recording(wav, raw_text, final_text)", src)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestReviewHardening(unittest.TestCase):
@@ -388,3 +386,7 @@ class TestReviewHardening(unittest.TestCase):
              _mock.patch.dict(os.environ, {"VOICE_INPUT_ENGINE": "npu"}, clear=False):
             terms._probe_counter()
         self.assertIn("/fake/ov/small-int8-ov", seen["pat"])
+
+
+if __name__ == "__main__":
+    unittest.main()
