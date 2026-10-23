@@ -16,7 +16,7 @@ DEFAULT_TERMS_PATH = os.path.expanduser("~/.config/voice-input/terms.json")
 
 MAX_PROMPT_TOKENS = 200   # Whisper initial_prompt 硬限 224 - 24 安全余量(引导语/分隔符波动)
 FALLBACK_TERM_CAP = 30    # 无 tokenizer 可用时的旧行为(terms[:30])
-_ASCII_WORD_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+_ASCII_WORD_KEY = re.compile(r"[A-Za-z0-9_-]+\Z")
 
 
 def load_terms(path: str = DEFAULT_TERMS_PATH) -> dict:
@@ -66,7 +66,7 @@ def apply_corrections_counted(text, corrections):
         return text, 0
 
     def piece(key):
-        if _ASCII_WORD_KEY.match(key):
+        if _ASCII_WORD_KEY.fullmatch(key):
             return r"(?<![A-Za-z0-9_-])" + re.escape(key) + r"(?![A-Za-z0-9_-])"
         return re.escape(key)                  # 中文 / c++ / foo.bar:裸字面量
 
@@ -107,7 +107,7 @@ def _probe_counter():
         if not candidates:
             return None
         from tokenizers import Tokenizer
-        tok = Tokenizer.from_file(candidates[-1])
+        tok = Tokenizer.from_file(candidates[0])  # 首个快照目录,与 resolve_model_path 取向一致
         return lambda text: len(tok.encode(" " + text.strip()).ids)
     except Exception:
         return None
@@ -138,6 +138,11 @@ def build_prompt(terms: list, token_count=_token_count) -> "str | None":
     for term in terms:
         prompt = intro + "、".join([*kept, str(term)]) + "。"
         n = token_count(prompt) if token_count is not None else None
+        if n is None and token_count is not None:
+            try:
+                n = token_count(prompt)
+            except Exception:
+                n = None
         if n is None:
             if not _TOKENIZER_STATE["warned"]:
                 _TOKENIZER_STATE["warned"] = True
@@ -147,6 +152,8 @@ def build_prompt(terms: list, token_count=_token_count) -> "str | None":
         if n <= MAX_PROMPT_TOKENS or not kept:
             kept.append(str(term))
             if n > MAX_PROMPT_TOKENS:  # 首词单独就超预算:保留它,停止
+                print(f"[voice-input] terms: kept {len(kept)}/{len(terms)} words "
+                      f"(token budget {MAX_PROMPT_TOKENS})", file=sys.stderr)
                 break
             continue
         print(f"[voice-input] terms: kept {len(kept)}/{len(terms)} words "

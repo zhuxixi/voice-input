@@ -315,3 +315,76 @@ class TestCorrectionsWiring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReviewHardening(unittest.TestCase):
+    """CR nits #5/#6: boundary, warn-once, worker log string, probe path resolution."""
+
+    def test_boundary_200_inclusive(self):
+        # fake counter that reports exactly 200 for any prompt -> all kept (<=)
+        p = terms.build_prompt(["甲", "乙"], token_count=lambda s: terms.MAX_PROMPT_TOKENS)
+        self.assertIn("甲", p); self.assertIn("乙", p)
+
+    def test_warn_once_on_fallback(self):
+        import io as _io
+        state = {"probed": True, "counter": None, "warned": False}
+        with _mock.patch.object(terms, "_TOKENIZER_STATE", state):
+            with _mock.patch("sys.stderr", new_callable=_io.StringIO) as err:
+                terms.build_prompt(["a"], token_count=None)
+                terms.build_prompt(["b"], token_count=None)
+        self.assertEqual(err.getvalue().count("tokenizer unavailable"), 1)
+
+    def test_truncation_log_line(self):
+        import io as _io
+        calls = {"n": 0}
+        def fake(s):
+            calls["n"] += 1
+            return 100 if calls["n"] <= 3 else 999
+        with _mock.patch("sys.stderr", new_callable=_io.StringIO) as err:
+            terms.build_prompt(["w%d" % i for i in range(10)], token_count=fake)
+        self.assertIn("terms: kept", err.getvalue())
+
+    def test_worker_log_string(self):
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "transcribe_worker.py"), encoding="utf-8").read()
+        self.assertIn("corrections: {n_fixed} replaced", src)
+
+    def test_probe_path_resolution(self):
+        import sys as _sys, types
+        fake_engine = types.ModuleType("engine")
+        fake_engine.ENV_MODEL = "VOICE_INPUT_MODEL"
+        fake_engine.engine_name = lambda env: env.get("VOICE_INPUT_ENGINE", "cuda")
+        fake_engine.default_model = lambda name: "small-int8-ov" if name == "npu" else "large-v3"
+        fake_engine.ov_snapshots_base = lambda m: f"/fake/ov/{m}"
+        fake_engine.snapshots_base = lambda m: f"/fake/ct2/{m}"
+        fake_tokenizers = types.ModuleType("tokenizers")
+        class _Tok:
+            @staticmethod
+            def from_file(path):
+                return types.SimpleNamespace(
+                    encode=lambda t: types.SimpleNamespace(ids=[0] * 5))
+        fake_tokenizers.Tokenizer = _Tok
+        seen = {}
+        def fake_glob(pat):
+            seen["pat"] = pat
+            return [pat.replace("*", "rev1")]
+        with _mock.patch.dict(_sys.modules, {"engine": fake_engine,
+                                             "tokenizers": fake_tokenizers}), \
+             _mock.patch.object(terms.glob, "glob", fake_glob), \
+             _mock.patch.dict(os.environ, {"VOICE_INPUT_ENGINE": "cuda"}, clear=False):
+            counter = terms._probe_counter()
+        self.assertIn("/fake/ct2/large-v3", seen["pat"])
+        self.assertIsNotNone(counter)
+        with _mock.patch.dict(_sys.modules, {"engine": fake_engine,
+                                             "tokenizers": fake_tokenizers}), \
+             _mock.patch.object(terms.glob, "glob", fake_glob), \
+             _mock.patch.dict(os.environ, {"VOICE_INPUT_ENGINE": "cuda",
+                                           "VOICE_INPUT_MODEL": "small"}, clear=False):
+            terms._probe_counter()
+        self.assertIn("/fake/ct2/small", seen["pat"])
+        with _mock.patch.dict(_sys.modules, {"engine": fake_engine,
+                                             "tokenizers": fake_tokenizers}), \
+             _mock.patch.object(terms.glob, "glob", fake_glob), \
+             _mock.patch.dict(os.environ, {"VOICE_INPUT_ENGINE": "npu"}, clear=False):
+            terms._probe_counter()
+        self.assertIn("/fake/ov/small-int8-ov", seen["pat"])
