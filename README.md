@@ -257,15 +257,25 @@ Notes:
 ```json
 {
   "terms": ["Claude", "git", "diff", "pull request"],
-  "hotwords": null
+  "hotwords": null,
+  "corrections": {"sql": "skill", "批诏": "pjob"}
 }
 ```
 
 - **`terms`** — a list of words or phrases embedded into the Whisper `initial_prompt`
-  (first 30 entries) to bias recognition toward your vocabulary (proper nouns,
-  project names, technical terms).
+  to bias recognition toward your vocabulary (proper nouns,
+  project names, technical terms). Fitting is budget-driven (#33): up to
+  `MAX_PROMPT_TOKENS = 200` tokens measured with the bundled tokenizer (≈45–50
+  Chinese words; falls back to the legacy 30-word cap when no tokenizer is
+  found).
 - **`hotwords`** — `null`, a list, or a space-separated string forwarded to
   faster-whisper's `hotwords` parameter.
+- **`corrections`** — deterministic wrong→right replacements applied after
+  transcription (#33): the safety net hotwords can't provide for stable
+  mishearings (`skill`→`sql`, `pjob`→`批诏`). Keys containing only
+  `[A-Za-z0-9_-]` match whole words case-insensitively; all other keys match as
+  literals. One pass, longest key first, no chaining; empty value deletes.
+  Applied on every engine before the text is delivered/archived.
 - **Robustness**: a missing, malformed, or non-UTF-8 `terms.json` never breaks
   transcription — the program degrades to plain transcription and logs a warning.
 - Works on every engine: cuda/cpu (faster-whisper) and npu (stateful pipeline,
