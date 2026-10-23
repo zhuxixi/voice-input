@@ -1,8 +1,11 @@
+import io
 import json
 import os
 import tempfile
 import unittest
+import unittest.mock as _mock
 
+import terms
 from terms import DEFAULT_TERMS_PATH, load_terms, build_prompt, build_transcribe_kwargs
 
 
@@ -10,7 +13,7 @@ class TestLoadTerms(unittest.TestCase):
     def test_missing_file_returns_empty_no_raise(self):
         # 文件不存在 -> 空配置,不抛
         cfg = load_terms("/nonexistent/path/terms.json")
-        self.assertEqual(cfg, {"terms": [], "hotwords": None})
+        self.assertEqual(cfg, {"terms": [], "hotwords": None, "corrections": {}})
 
     def test_invalid_json_returns_empty_no_raise(self):
         # JSON 错 -> 空配置,不抛
@@ -19,7 +22,7 @@ class TestLoadTerms(unittest.TestCase):
             path = f.name
         try:
             cfg = load_terms(path)
-            self.assertEqual(cfg, {"terms": [], "hotwords": None})
+            self.assertEqual(cfg, {"terms": [], "hotwords": None, "corrections": {}})
         finally:
             os.unlink(path)
 
@@ -30,7 +33,7 @@ class TestLoadTerms(unittest.TestCase):
             path = f.name
         try:
             cfg = load_terms(path)
-            self.assertEqual(cfg, {"terms": ["zima", "jfox"], "hotwords": None})
+            self.assertEqual(cfg, {"terms": ["zima", "jfox"], "hotwords": None, "corrections": {}})
         finally:
             os.unlink(path)
 
@@ -52,8 +55,9 @@ class TestBuildPrompt(unittest.TestCase):
         self.assertIn("术语", prompt)  # 中文包装句
 
     def test_truncates_to_30_terms(self):
+        # 无 tokenizer 时回退 terms[:30](#33 A6:显式注入 None,不依赖运行环境)
         many = [f"term{i}" for i in range(100)]
-        prompt = build_prompt(many)
+        prompt = build_prompt(many, token_count=None)
         self.assertIn("term29", prompt)
         self.assertNotIn("term30", prompt)
 
@@ -107,7 +111,7 @@ class TestLoadTermsRobustness(unittest.TestCase):
         # JSON 顶层非 dict(裸数组) -> load_terms 降级空配置
         path = self._with_content(b"[1,2,3]")
         try:
-            self.assertEqual(load_terms(path), {"terms": [], "hotwords": None})
+            self.assertEqual(load_terms(path), {"terms": [], "hotwords": None, "corrections": {}})
         finally:
             os.unlink(path)
 
@@ -115,7 +119,7 @@ class TestLoadTermsRobustness(unittest.TestCase):
         # 非 UTF-8 字节 -> UnicodeDecodeError 被兜底 -> 降级
         path = self._with_content(b"\xff\xfe\x00{")
         try:
-            self.assertEqual(load_terms(path), {"terms": [], "hotwords": None})
+            self.assertEqual(load_terms(path), {"terms": [], "hotwords": None, "corrections": {}})
         finally:
             os.unlink(path)
 
@@ -130,6 +134,122 @@ class TestLoadTermsRobustness(unittest.TestCase):
         result = build_prompt([1, 2])
         self.assertIsNotNone(result)
         self.assertIn("1", result)
+
+
+
+class TestApplyCorrections(unittest.TestCase):
+    """#33 A1-A4:确定性替换(re.sub 单趟,stdout 无依赖)。"""
+
+    def test_chinese_key_substring(self):
+        self.assertEqual(terms.apply_corrections("我看一下批诏的状态", {"批诏": "pjob"}),
+                         "我看一下pjob的状态")
+
+    def test_missing_or_none_corrections_identity(self):
+        self.assertEqual(terms.apply_corrections("abc", None), "abc")
+        self.assertEqual(terms.apply_corrections("abc", {}), "abc")
+        self.assertEqual(terms.apply_corrections("", {"a": "b"}), "")
+
+    def test_ascii_word_case_insensitive_no_substring_damage(self):
+        out = terms.apply_corrections("跑一下SQL和sqlite查询", {"sql": "skill"})
+        self.assertEqual(out, "跑一下skill和sqlite查询")
+
+    def test_longest_key_first(self):
+        out = terms.apply_corrections("GitHub issue", {"GitHub": "GH", "GitHub issue": "GI"})
+        self.assertEqual(out, "GI")
+
+    def test_no_chaining(self):  # A3b:替换结果不被另一键二次命中
+        out = terms.apply_corrections("a b", {"a": "b", "b": "c"})
+        self.assertEqual(out, "b c")
+
+    def test_empty_value_deletes(self):
+        self.assertEqual(terms.apply_corrections("x字幕by索兰娅y", {"字幕by索兰娅": ""}), "xy")
+
+    def test_ascii_with_punct_matches_literal(self):
+        self.assertEqual(terms.apply_corrections("写c++代码", {"c++": "C++"}), "写C++代码")
+
+    def test_casefold_conflict_last_wins(self):
+        out = terms.apply_corrections("SQL", {"sql": "a", "SQL": "b"})
+        self.assertEqual(out, "b")
+
+    def test_invalid_entries_skipped_with_warning(self):
+        with _mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            out = terms.apply_corrections("ok", {"": "x", 1: "y", "k": 2})
+        self.assertEqual(out, "ok")
+        self.assertIn("corrections", err.getvalue())
+
+
+class TestTokenBudget(unittest.TestCase):
+    """#33 A5-A6:词粒度预算截断(fake counter,不依赖 tokenizer)。"""
+
+    WORDS = [f"词{i}" for i in range(60)]
+
+    def test_budget_keeps_all_when_fits(self):
+        p = terms.build_prompt(self.WORDS[:10], token_count=lambda s: 100)
+        for w in self.WORDS[:10]:
+            self.assertIn(w, p)
+
+    def test_budget_stops_at_word_boundary(self):
+        calls = {"n": 0}
+
+        def fake(s):
+            calls["n"] += 1
+            return 150 if calls["n"] <= 12 else 999
+
+        p = terms.build_prompt(self.WORDS, token_count=fake)
+        kept = [w for w in self.WORDS if w in p]
+        self.assertEqual(len(kept), 12)
+        self.assertEqual(kept, self.WORDS[:12])
+
+    def test_min_one_term_even_if_over_budget(self):
+        p = terms.build_prompt(["超长词"], token_count=lambda s: 9999)
+        self.assertIn("超长词", p)
+
+    def test_none_counter_falls_back_to_30(self):
+        with _mock.patch("sys.stderr", new_callable=io.StringIO):
+            p = terms.build_prompt(self.WORDS, token_count=None)
+        legacy = "以下是本次内容可能涉及的术语:" + "、".join(self.WORDS[:30]) + "。"
+        self.assertEqual(p, legacy)
+
+    def test_empty_terms_still_none(self):
+        self.assertIsNone(terms.build_prompt([], token_count=lambda s: 5))
+
+
+class TestProbeCache(unittest.TestCase):
+    """#33 A6:探测结果进程内缓存(含失败),二次调用不重探。"""
+
+    def test_probe_cached_including_failure(self):
+        calls = {"n": 0}
+
+        def fake_probe():
+            calls["n"] += 1
+            return None
+
+        fresh = {"probed": False, "counter": None, "warned": False}
+        with _mock.patch.object(terms, "_TOKENIZER_STATE", fresh), \
+                _mock.patch.object(terms, "_probe_counter", fake_probe):
+            self.assertIsNone(terms._token_count("x"))
+            self.assertIsNone(terms._token_count("y"))
+        self.assertEqual(calls["n"], 1)
+
+
+class TestLoadTermsCorrections(unittest.TestCase):
+    """#33 A7:corrections 键解析(缺失 -> {},合法 -> 原样)。"""
+
+    def test_missing_key_defaults_to_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.json")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write('{"terms": ["a"]}')
+            cfg = terms.load_terms(p)
+        self.assertEqual(cfg["corrections"], {})
+
+    def test_corrections_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.json")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write('{"corrections": {"sql": "skill"}}')
+            cfg = terms.load_terms(p)
+        self.assertEqual(cfg["corrections"], {"sql": "skill"})
 
 
 if __name__ == "__main__":
