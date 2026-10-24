@@ -51,7 +51,7 @@ import signal
 import vad_trim
 from archive import archive_recording, ARCHIVE_ENABLED
 from media_pause import pause_playing, resume, PAUSE_MEDIA_ENABLED
-from terms import load_terms, build_prompt, build_transcribe_kwargs
+from terms import apply_corrections, load_terms, build_prompt, build_transcribe_kwargs
 import gi
 
 gi.require_version("Gtk", "3.0")
@@ -235,24 +235,26 @@ def stop_recording():
         print("[voice-input] recording empty/too short (<1KB); arecord may have failed (EBUSY/device busy?)", file=sys.stderr)
         return
 
-    text = ""  # 预置:转写若抛 BaseException(如 KeyboardInterrupt)不致 finally NameError
+    raw_text = final_text = ""  # 预置:转写若抛 BaseException(如 KeyboardInterrupt)不致 finally NameError
     try:
         m = load_model()
-        # terms 组装独立 inner try:热词问题降级到无 prompt,绝不阻断 transcribe(spec §3.5)。
+        # terms 组装独立 inner try:热词/纠错问题降级到无 prompt,绝不阻断 transcribe(spec §3.5)。
         # load_terms/build_prompt/build_transcribe_kwargs 内部已降级,这里是双保险。
         try:
             cfg = load_terms()
             prompt = build_prompt(cfg.get("terms", []))
             extra_kw = build_transcribe_kwargs(cfg)
+            corrections = cfg.get("corrections", {})
         except Exception as te:
             print(f"[voice-input] terms assemble failed, degrade to no-prompt: {te}", file=sys.stderr)
             prompt = None
             extra_kw = {}
+            corrections = {}
         with vad_trim.trimmed_wav(wav) as src:
             if src is None:
                 print("[voice-input] vad: no speech, empty transcript",
                       file=sys.stderr)
-                text = ""
+                raw_text = final_text = ""
             else:
                 segments, info = m.transcribe(
                     src,
@@ -260,32 +262,33 @@ def stop_recording():
                     initial_prompt=prompt,
                     **extra_kw,
                 )
-                text = "".join(s.text for s in segments).strip()
+                raw_text = "".join(s.text for s in segments).strip()
+                final_text = apply_corrections(raw_text, corrections)
     except Exception as e:
         print(f"[voice-input] Error: {e}", file=sys.stderr)
-        text = ""
+        raw_text = final_text = ""
     finally:
-        # 归档(独立 try,失败不影响转写/粘贴)
-        if ARCHIVE_ENABLED and text and os.path.exists(wav):
+        # 归档(独立 try,失败不影响转写/粘贴);raw=纠正前、final=上屏文本
+        if ARCHIVE_ENABLED and final_text and os.path.exists(wav):
             try:
-                archive_recording(wav, text, text)
+                archive_recording(wav, raw_text, final_text)
             except Exception as ae:
                 print(f"[voice-input] archive failed: {ae}", file=sys.stderr)
         if os.path.exists(wav):  # 异常/归档失败 → wav 还在 → 清理
             os.unlink(wav)
 
-    if text:
+    if final_text:
         if active_window:
             subprocess.run(["xdotool", "windowactivate", "--sync", active_window],
                            stderr=subprocess.DEVNULL)
             time.sleep(0.1)
-        subprocess.run(["xsel", "--clipboard", "--input"], input=text.encode(),
+        subprocess.run(["xsel", "--clipboard", "--input"], input=final_text.encode(),
                        stderr=subprocess.DEVNULL)
         time.sleep(0.05)
         subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+shift+v"])
         GLib.idle_add(show_overlay, "DONE", "#4fc3f7")
         threading.Timer(1.5, lambda: GLib.idle_add(hide_overlay)).start()
-        print(f"[voice-input] Typed: {text}", flush=True)
+        print(f"[voice-input] Typed: {final_text}", flush=True)
     else:
         print("[voice-input] No text detected", flush=True)
 

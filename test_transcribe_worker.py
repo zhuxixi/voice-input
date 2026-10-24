@@ -34,7 +34,7 @@ class FakeModel:
         if self.raise_next:
             self.raise_next = False
             raise RuntimeError("boom")
-        text = "" if wav.endswith("silence.wav") else "你好"
+        text = "" if wav.endswith("silence.wav") else getattr(self, "text", "你好")
         seg = type("Seg", (), {"text": text})()
         return [seg], type("Info", (), {"language": language})()
 
@@ -175,6 +175,37 @@ class TestVadWiring(WorkerHarness):
             self.parent.flush()
             self.assertEqual(self.read(), {"id": 1, "text": "你好"})
         self.assertEqual(self.model.calls[0]["wav"], "/tmp/trimmed.wav")
+
+
+class TestCorrectionsWiring(WorkerHarness):
+    """#33 A8: worker 对响应文本应用 corrections(与 terms 同一次加载,热加载生效)。"""
+
+    CORRECTIONS = '{"terms": [], "corrections": {"批诏": "pjob", "sql": "skill"}}'
+
+    def setUp(self):
+        super().setUp()
+        with open(self.terms_path, "w", encoding="utf-8") as fh:
+            fh.write(self.CORRECTIONS)
+        self.model.text = "批诏 sql"
+
+    def test_corrections_applied_to_response(self):
+        self.start()
+        self.read()
+        self.parent.write(wp.encode_request(1, "/tmp/a.wav"))
+        self.parent.flush()
+        self.assertEqual(self.read(), {"id": 1, "text": "pjob skill"})
+
+    def test_corrections_reloaded_per_request(self):
+        self.start()
+        self.read()
+        self.parent.write(wp.encode_request(1, "/tmp/a.wav"))
+        self.parent.flush()
+        self.assertEqual(self.read(), {"id": 1, "text": "pjob skill"})
+        with open(self.terms_path, "w", encoding="utf-8") as fh:
+            fh.write('{"terms": [], "corrections": {"批诏": "pijob"}}')
+        self.parent.write(wp.encode_request(2, "/tmp/a.wav"))
+        self.parent.flush()
+        self.assertEqual(self.read(), {"id": 2, "text": "pijob sql"})
 
 
 class TestPreambleInvalidEngine(unittest.TestCase):
