@@ -26,6 +26,7 @@ Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical
 | D7 | prune **只删目录，不动 `index.jsonl`** | 保住 append-only 不变量，避免重写索引时的并发追加丢失 | 重写 index：需要锁，收益仅是「索引干净」 |
 | D8 | **worker 协议不改**（`PROTOCOL_VERSION` 保持 1） | 归档发生在转写进程内部，父进程无需知道 | 扩 `encode_text` 回传元数据：为父进程归档服务，D1 已否决该路线 |
 | D9 | 失败隔离：归档异常 log 到 stderr，**绝不影响转写结果与上屏** | 与 `voice-ptt.py:272` 同语义 | 失败即报错：把数据基础设施问题升级成输入法不可用 |
+| D11 | `archive_recording(..., keep_source=True)` 供 `transcribe_once.py` 使用：**永不删除调用方给的文件** | CLI 参数是用户文件；`transcribe_once.py` 现在会被手动运行/被 `test-mic.sh` 调用，删输入 = 静默数据丢失。hold legacy 分支的临时 wav 由父进程 `finally` 删除，不依赖归档 | 让 CLI 也删源：手动跑一次就毁掉一条录音 |
 | D10 | 把 `transcribe_once.py` 的 **import 期副作用**（venv 站点探测 + 引擎校验 + `LD_LIBRARY_PATH` 注入）抽成 `_preamble()`，由 `main()` 调用 | 现状导致模块不可 import（无 venv 环境直接 `sys.exit(1)`）、无法单测；worker 已是这个形状（`transcribe_worker._preamble`），对齐即可 | 保持 import 期副作用 + 改用 subprocess 集成测：慢、且照样污染进程环境 |
 
 ## 3. 数据流
@@ -55,14 +56,16 @@ ARCHIVE_ENABLED    # 不变（VOICE_INPUT_ARCHIVE != "0"，导入时求值）
 ARCHIVE_KEEP_DAYS  # 新增：VOICE_INPUT_ARCHIVE_KEEP_DAYS，非负整数，坏值/缺省 → 0
 
 def archive_recording(wav_path, raw_text, final_text, archive_dir=ARCHIVE_DIR, *,
-                      engine=None, model=None, vad=None) -> str:
+                      engine=None, model=None, vad=None, keep_source=False) -> str:
     """现有语义与回滚原则完全不变。
     三个新参数全为 None 时，record 的键集合与今天一致（向后兼容）。
     engine/model：仅非 None 时写入。
+    keep_source=True：只拷贝、不删源（transcribe_once 用，见 D11）。
+    源文件不存在时在 makedirs 之前就抛 FileNotFoundError（不留下空的 archive 根目录）。
     vad：dict（来自 vad_trim.vad_summary() + status），作为 record["vad"] 整体写入。"""
 
 def archive_result(wav_path, raw_text, final_text, *, engine=None, model=None, vad=None,
-                   archive_dir=ARCHIVE_DIR, log=None) -> bool:
+                   archive_dir=ARCHIVE_DIR, log=None, keep_source=False) -> bool:
     """ARCHIVE_ENABLED 判定 + 异常兜底的一层壳。
     `archive_dir` 显式传 None 归一为 ARCHIVE_DIR（防止调用方把 None 直传击穿默认值）。
     返回 True=已归档 / False=未归档（开关关闭或失败）。任何异常只 log，绝不上抛。"""
@@ -157,8 +160,9 @@ with vad_trim.trimmed_wav(wav, stats=stats) as src:
         text = "".join(s.text for s in segments).strip()
 raw = text
 text = apply_corrections(text, corrections)
-archive.archive_result(wav, raw, text, engine=..., model=..., vad=stats)   # D2：归档在前
-print(text)                                                                # 结果通道在后
+archive.archive_result(wav, raw, text, engine=..., model=..., vad=stats,
+                       keep_source=True)          # D2 归档在前；D11 不删输入
+print(text)                                       # 结果通道在后
 ```
 
 `main()` 中在 `archive.ARCHIVE_ENABLED` 为真时同样调一次 `prune_recordings(keep_days=archive.ARCHIVE_KEEP_DAYS)`（短进程每次启动清一次，`keep_days=0` 时是 no-op）。
@@ -204,6 +208,7 @@ print(text)                                                                # 结
 | A10 | `transcribe_once` 归档 | 自动化（integration） | `python3 -m unittest test_archive.TestTranscribeOnceHook -v` | 临时 archive_dir 有记录，raw/final 语义与 worker 一致 |
 | A11 | 全量回归 | 自动化（integration） | ① `python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim -v` ② `venv/bin/python3 -m unittest test_engine -v` ③ `VOICE_INPUT_ENGINE=npu venv/bin/python3 -m unittest test_vad_trim -v` | 三条命令全绿；③ 中 `TestSpeechSpans`、`TestEndToEnd` 均执行（`TestEndToEnd` 的 `skipUnless` 要求 `VOICE_INPUT_ENGINE=npu` + repro wav + npu 依赖，故显式带 env；缺任一前置时记 pending 并说明，不得谎报为通过） |
 | A12 | prune 接线 | 自动化（unit） | `python3 -m unittest test_transcribe_worker.TestArchiveHook.test_prune_runs_once_on_start -v` | `worker_main` 启动时 `prune_recordings` 被调用一次且收到 `archive_dir`/`KEEP_DAYS`；`ARCHIVE_ENABLED=0` 时不被调用 |
+| A14 | `transcribe_once` 不删输入（D11） | 自动化（unit） | `python3 -m unittest test_archive.TestTranscribeOnceHook -v` | speech / no_speech 两种情况下源 wav 都仍在；`archive_recording(keep_source=True)` 单测覆盖拷贝不删源 |
 | A13 | `transcribe_once` 可 import（D10） | 自动化（integration） | `python3 -m unittest test_archive.TestTranscribeOnceImport -v`（内部 `subprocess.run([sys.executable, "-c", "import transcribe_once; print('ok')"], env=<无 LD_LIBRARY_PATH>)`） | 子进程退出码 0、stdout 含 `ok`；父进程 `os.environ` 未被改写 |
 | U1 | 真机端到端 | 用户实测 | ① `cd ~/work/git-repo/voice-input && git pull`（确认在含本次改动的 commit）② `systemctl --user restart voice-hold`（常驻 worker 由 daemon 启动期预热，不重启会跑旧代码）③ `journalctl --user -u voice-hold -n 20` 确认出现 `[worker] model ready` ④ 按住右 Alt 说一句中文 ⑤ 检查 `~/.local/share/voice-input/recordings/` 最新目录与 `index.jsonl` | 出现目录三件套 + 索引行含 `vad` 字段；上屏延迟无可感变化；若延迟可感则记录实测值并回退 D2 方案 |
 | U2 | README 双语 | 用户实测（人工核对） | 通读 README.md 与 README.zh-CN.md 的归档章节 | 目录位置、开关、保留期、字段说明齐全且两语言一致 |
@@ -222,6 +227,13 @@ print(text)                                                                # 结
 | 生命周期 | prune 接线 | `prune_recordings` 可 patch | 断言启动时被调一次且收到注入的 `archive_dir`；开关关闭时不调（A12） |
 
 关键边界：`archive_result` 是唯一允许 `try/except` 的位置，worker 循环因此不需要新增错误分支；`vad_trim` 仍保持「永不抛」的既有契约。
+
+## 8b. 实施期发现的契约变更（记录在案）
+
+| 项 | 原契约 | 现契约 | 影响 |
+|---|---|---|---|
+| `test_engine.TestTranscribeOnceEnv`（#19 A6） | 断言 **import** `transcribe_once` 就写 `LD_LIBRARY_PATH` / npu 缺路径即退出 1 | D10 后改为断言 `_preamble()` 的返回值与等价字符串（逐字节不变） | 唯一 import 方是测试；真实调用方（脚本/`check_output`）行为不变。4 个用例已同步改写 |
+| `archive_recording` 遇缺失源 | 先 `makedirs`，复制失败后 rmtree 记录目录（父目录 `recordings/` 残留） | 先 `isfile` 检查即抛 | 避免空归档根目录被测试/误用制造出来 |
 
 ## 9. 风险与开放问题
 

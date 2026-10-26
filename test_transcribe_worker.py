@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import wave
 import json
 import os
 import shutil
@@ -58,12 +59,13 @@ class WorkerHarness(unittest.TestCase):
         self.child_file = self.child.makefile("rwb")
         self.done = None
 
-    def start(self, log=None):
+    def start(self, log=None, archive_dir=None, conn=None):
         def run():
-            self.done = tw.worker_main(self.child_file, model_factory=lambda: self.model,
+            self.done = tw.worker_main(conn or self.child_file,
+                                       model_factory=lambda: self.model,
                                        terms_loader=lambda path=None: tw.load_terms(
                                            self.terms_path),
-                                       log=log)
+                                       log=log, archive_dir=archive_dir)
         t = threading.Thread(target=run, daemon=True)
         t.start()
         self.addCleanup(t.join, 5.0)
@@ -266,3 +268,135 @@ class TestRealProcessEof(unittest.TestCase):
             self.assertEqual(wp.parse_line(f.readline())["event"], "ready")
         parent.close()                          # simulate the daemon vanishing
         self.assertEqual(proc.wait(timeout=5.0), 0)
+
+
+class RecordingConn:
+    """File-like proxy that logs write() calls (for the archive/reply ordering)."""
+
+    def __init__(self, inner, events):
+        self._inner = inner
+        self._events = events
+
+    def write(self, data):
+        self._events.append("write")
+        return self._inner.write(data)
+
+    def flush(self):
+        return self._inner.flush()
+
+    def readline(self):
+        return self._inner.readline()
+
+
+def _write_wav(path, seconds=0.2, sample_rate=16000):
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(b"\x00\x00" * int(sample_rate * seconds))
+
+
+class TestArchiveHook(WorkerHarness):
+    """#44 A5/A6/A7/A8/A9/A12: worker-side archiving contract."""
+
+    def setUp(self):
+        super().setUp()
+        self.archive_dir = os.path.join(self._tmp, "recordings")
+        self.wav = os.path.join(self._tmp, "dictation.wav")
+        _write_wav(self.wav)
+        self.events = []
+
+    def trim_to(self, src, status="kept"):
+        @contextlib.contextmanager
+        def fake(path, stats=None, **kwargs):
+            if stats is not None:
+                stats.update({"status": status, "threshold": 0.5,
+                              "speech_pad_ms": 400, "total_s": 0.2,
+                              "kept_s": 0.2 if status == "kept" else 0.0,
+                              "kept_ratio": 1.0 if status == "kept" else 0.0,
+                              "spans": 1 if status == "kept" else 0})
+            yield src
+        return mock.patch.object(tw.vad_trim, "trimmed_wav", fake)
+
+    def send(self, wav=None):
+        self.parent.write(wp.encode_request(1, wav or self.wav))
+        self.parent.flush()
+        return self.read()
+
+    def records(self):
+        path = os.path.join(self.archive_dir, "index.jsonl")
+        if not os.path.isfile(path):
+            return []
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh.read().strip().splitlines()]
+
+    def test_archives_original_audio_with_vad_metadata(self):
+        source_size = os.path.getsize(self.wav)
+        self.start(archive_dir=self.archive_dir)
+        self.read()
+        with self.trim_to(self.wav):
+            self.assertEqual(self.send(), {"id": 1, "text": "你好"})
+        records = self.records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["vad"]["status"], "kept")
+        self.assertEqual(records[0]["vad"]["spans"], 1)
+        self.assertEqual(records[0]["raw"], "你好")
+        self.assertIn("engine", records[0])
+        rec_dir = os.path.join(self.archive_dir, records[0]["dir"])
+        archived = os.path.join(rec_dir, "audio.wav")
+        self.assertEqual(os.path.getsize(archived), source_size,
+                         "archived audio must be the original, untrimmed wav")
+
+    def test_archive_precedes_reply(self):
+        self.start(archive_dir=self.archive_dir, conn=RecordingConn(self.child_file,
+                                                                    self.events))
+        self.read()
+        self.events.clear()
+        with self.trim_to(self.wav):
+            with mock.patch.object(tw.archive, "archive_result",
+                                   lambda *a, **k: self.events.append("archive")):
+                self.assertEqual(self.send(), {"id": 1, "text": "你好"})
+        self.assertEqual(self.events, ["archive", "write"])
+
+    def test_archive_failure_still_replies(self):
+        self.start(archive_dir=self.archive_dir)
+        self.read()
+        with self.trim_to(self.wav):
+            with mock.patch.object(tw.archive, "archive_recording",
+                                   side_effect=OSError("read-only fs")):
+                self.assertEqual(self.send(), {"id": 1, "text": "你好"})
+        self.assertEqual(self.records(), [])
+
+    def test_disabled_archiving_writes_nothing(self):
+        with mock.patch.object(tw.archive, "ARCHIVE_ENABLED", False):
+            self.start(archive_dir=self.archive_dir)
+            self.read()
+            with self.trim_to(self.wav):
+                self.assertEqual(self.send(), {"id": 1, "text": "你好"})
+        self.assertFalse(os.path.exists(self.archive_dir))
+        self.assertTrue(os.path.exists(self.wav))
+
+    def test_no_speech_is_archived(self):
+        self.start(archive_dir=self.archive_dir)
+        self.read()
+        with self.trim_to(None, status="no_speech"):
+            self.assertEqual(self.send(), {"id": 1, "text": ""})
+        records = self.records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["raw"], "")
+        self.assertEqual(records[0]["vad"]["status"], "no_speech")
+
+    def test_prune_runs_once_on_start(self):
+        with mock.patch.object(tw.archive, "prune_recordings",
+                               return_value=[]) as prune:
+            self.start(archive_dir=self.archive_dir)
+            self.read()
+        prune.assert_called_once()
+        self.assertEqual(prune.call_args[0][0], self.archive_dir)
+
+    def test_prune_skipped_when_disabled(self):
+        with mock.patch.object(tw.archive, "ARCHIVE_ENABLED", False):
+            with mock.patch.object(tw.archive, "prune_recordings") as prune:
+                self.start(archive_dir=self.archive_dir)
+                self.read()
+        prune.assert_not_called()

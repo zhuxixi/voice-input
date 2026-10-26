@@ -6,11 +6,22 @@ test-mic.sh / voice-toggle.sh 的转写入口(#16:收敛原先三处内嵌 CUDA 
 VOICE_INPUT_MODEL 选择,默认 cuda + large-v3(契约见 engine.py 模块注释)。
 词表热词(#27): main() 组装 terms.initial_prompt/hotwords,所有引擎统一生效,组装失败降级为无提示转写。
 确定性纠错(#33): terms.json 的 corrections 在 join 后单趟应用到 stdout 文本。
+归档(#44): 与 hold 链路同一套 archive.archive_result —— 原始 wav + raw/final + VAD 决策。
 """
 
 import os
 import subprocess
 import sys
+
+# 顶层 import 一律 stdlib-only(#16/#19)，import 期不再有任何副作用：
+# venv 探测 / 引擎校验 / LD_LIBRARY_PATH 注入都收进 _preamble()，由 main() 调用
+# (#44 D10)，这样模块可被测试 import 并直接驱动 main()。
+import engine
+import vad_trim
+from archive import (ARCHIVE_ENABLED, ARCHIVE_KEEP_DAYS, archive_result,
+                     prune_recordings)
+from terms import (DEFAULT_TERMS_PATH, apply_corrections, build_prompt,
+                   build_transcribe_kwargs, load_terms)
 
 # Derive the repo location from this file (#11): works from any clone path.
 # realpath matches the shell wrappers' readlink -f, so invoking through a
@@ -18,62 +29,77 @@ import sys
 _REPO_DIR = os.path.dirname(os.path.realpath(__file__))
 VENV = os.path.join(_REPO_DIR, "venv")
 
-# Ask the venv's own interpreter where its site-packages are (#11): survives
-# in-place venv rebuilds that would leave a stale lib/python3.x dir behind.
-# 与 voice-ptt.py 同源的 venv 守卫(#16)。库路径前置自 #19 起收敛到
-# engine.py 按引擎计算(cuda/auto -> nvidia pip 三路径,与历史逐字节一致;
-# cpu -> 无;npu -> ze 驱动库目录且必须进程启动时已在)。
-try:
-    _SITE = subprocess.check_output(
-        [
-            os.path.join(VENV, "bin", "python3"),
-            "-c",
-            "import sysconfig; print(sysconfig.get_paths()['purelib'])",
-        ],
-        stderr=subprocess.DEVNULL,
-    ).decode().strip()
-except Exception:
-    _SITE = ""
-if not _SITE or not os.path.isdir(_SITE):
-    sys.stderr.write(
-        f"[voice-input] venv site-packages not found under {VENV} — "
-        "see README Installation\n"
-    )
-    sys.exit(1)
 
-import engine  # 顶层纯标准库(#16);preamble 计算收敛到 engine 单点(#19 债①)
-import vad_trim
-from terms import (DEFAULT_TERMS_PATH, apply_corrections, build_prompt,
-                   build_transcribe_kwargs, load_terms)
+def _preamble() -> int:
+    """venv site-packages probe + engine validation + LD_LIBRARY_PATH injection.
 
-try:
-    _ENG = engine.engine_name(dict(os.environ))
-    _LIB_PATHS = engine.required_lib_paths(_ENG, _SITE)
-except ValueError as e:
-    # 非法引擎值:干净退出不裸 traceback(与 main() 内错误路径同款)
-    sys.stderr.write(f"[voice-input] {e}\n")
-    sys.exit(1)
+    Ask the venv's own interpreter where its site-packages are (#11): survives
+    in-place venv rebuilds that would leave a stale lib/python3.x dir behind.
+    库路径前置自 #19 起收敛到 engine.py 按引擎计算(cuda/auto -> nvidia pip
+    三路径,与历史逐字节一致; cpu -> 无; npu -> ze 驱动库目录且必须进程启动时已在)。
 
-# npu 的库路径必须在进程启动时就在 LD_LIBRARY_PATH 里(ld.so 只读一次,
-# 进程内改无效——KB A/B 实证);缺失时给可行动报错,不做 re-exec 魔法
-if _ENG == "npu" and not engine.has_library_paths(dict(os.environ), _LIB_PATHS):
-    sys.stderr.write(
-        "[voice-input] NPU engine requires LD_LIBRARY_PATH to contain "
-        f"{engine.NPU_LIB_DIR} at process start (ld.so reads it once).\n"
-        f"  export LD_LIBRARY_PATH={engine.NPU_LIB_DIR}"
-        "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n"
-        "  or launch via voice-ptt.sh / voice-toggle.sh / voice_hold "
-        "(they inject it).\n"
-    )
-    sys.exit(1)
+    Returns 0 on success, or an exit code after writing an actionable message.
+    """
+    try:
+        site = subprocess.check_output(
+            [
+                os.path.join(VENV, "bin", "python3"),
+                "-c",
+                "import sysconfig; print(sysconfig.get_paths()['purelib'])",
+            ],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        site = ""
+    if not site or not os.path.isdir(site):
+        sys.stderr.write(
+            f"[voice-input] venv site-packages not found under {VENV} — "
+            "see README Installation\n"
+        )
+        return 1
 
-# cuda/auto 与 HEAD 输出逐字节一致(A6 钉死);cpu 不设置任何路径(惰性差异,
-# spec Design #4);本进程内设置只影响子进程继承与个别 dlopen 场景
-os.environ["LD_LIBRARY_PATH"] = engine.prepend_library_path(
-    dict(os.environ), _LIB_PATHS)
+    try:
+        eng = engine.engine_name(dict(os.environ))
+        lib_paths = engine.required_lib_paths(eng, site)
+    except ValueError as e:
+        # 非法引擎值:干净退出不裸 traceback(与 main() 内错误路径同款)
+        sys.stderr.write(f"[voice-input] {e}\n")
+        return 1
+
+    # npu 的库路径必须在进程启动时就在 LD_LIBRARY_PATH 里(ld.so 只读一次,
+    # 进程内改无效——KB A/B 实证);缺失时给可行动报错,不做 re-exec 魔法
+    if eng == "npu" and not engine.has_library_paths(dict(os.environ), lib_paths):
+        sys.stderr.write(
+            "[voice-input] NPU engine requires LD_LIBRARY_PATH to contain "
+            f"{engine.NPU_LIB_DIR} at process start (ld.so reads it once).\n"
+            f"  export LD_LIBRARY_PATH={engine.NPU_LIB_DIR}"
+            "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n"
+            "  or launch via voice-ptt.sh / voice-toggle.sh / voice_hold "
+            "(they inject it).\n"
+        )
+        return 1
+
+    # cuda/auto 与 HEAD 输出逐字节一致(A6 钉死);cpu 不设置任何路径(惰性差异,
+    # spec Design #4);本进程内设置只影响子进程继承与个别 dlopen 场景
+    os.environ["LD_LIBRARY_PATH"] = engine.prepend_library_path(
+        dict(os.environ), lib_paths)
+    return 0
+
+
+def _labels():
+    """(engine, model) for the archive index; never raises (#44)."""
+    try:
+        eng = os.environ.get(engine.ENV_ENGINE, engine.DEFAULT_ENGINE)
+        model = os.environ.get(engine.ENV_MODEL) or engine.default_model(eng)
+        return eng, model
+    except Exception:
+        return None, None
 
 
 def main(argv=None, terms_path=DEFAULT_TERMS_PATH) -> int:
+    rc = _preamble()
+    if rc:
+        return rc
     argv = sys.argv[1:] if argv is None else list(argv)
     if len(argv) != 1:
         print("usage: transcribe_once.py <wav>", file=sys.stderr)
@@ -91,16 +117,31 @@ def main(argv=None, terms_path=DEFAULT_TERMS_PATH) -> int:
         corrections = {}
         print(f"[voice-input] terms assemble failed, degrade to no-prompt: {te}",
               file=sys.stderr)
+    if ARCHIVE_ENABLED:
+        try:
+            prune_recordings(keep_days=ARCHIVE_KEEP_DAYS)
+        except Exception as pe:                      # prune never breaks a run
+            print(f"[archive] prune failed (non-fatal): {pe}", file=sys.stderr)
     model = engine.build_model()
-    with vad_trim.trimmed_wav(wav) as src:
+    stats = {}
+    with vad_trim.trimmed_wav(wav, stats=stats) as src:
         if src is None:
+            # #44 D5: an empty transcript still gets archived — a "VAD heard
+            # nothing" sample is exactly the negative evidence #43 needs.
             print("[voice-input] vad: no speech, empty transcript", file=sys.stderr)
-            print("")
-            return 0
-        segments, info = model.transcribe(src, language="zh",
-                                          initial_prompt=prompt, **extra_kw)
-        text = "".join(s.text for s in segments).strip()
-        text = apply_corrections(text, corrections)
+            text = ""
+        else:
+            segments, info = model.transcribe(src, language="zh",
+                                              initial_prompt=prompt, **extra_kw)
+            text = "".join(s.text for s in segments).strip()
+    raw = text
+    text = apply_corrections(raw, corrections)
+    eng_label, model_label = _labels()
+    # keep_source=True: `wav` is the caller's file (CLI argument, or a temp path
+    # owned — and later deleted — by the hold daemon). Freezing it here would be
+    # silent data loss for manual runs.
+    archive_result(wav, raw, text, engine=eng_label, model=model_label, vad=stats,
+                   keep_source=True)
     print(text)
     return 0
 
