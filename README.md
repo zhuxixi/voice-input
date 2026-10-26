@@ -215,10 +215,10 @@ the negative sample you want when debugging dropped dictations), `disabled`, or
 `degraded`. Everything runs behind a try/except: a failing archive logs one line
 and never blocks dictation.
 
-Budget: 16 kHz mono 16-bit is ~32 KB/s, so one minute of speech is ~1.9 MB. With
-the default `0` (keep everything) and no pruning, heavy use adds roughly 50–60 MB
-per hour of dictation; set `VOICE_INPUT_ARCHIVE_KEEP_DAYS` if that is more than
-you want on disk.
+Budget: 16 kHz mono 16-bit is 32 KB/s, i.e. **~1.9 MB per minute of recorded
+speech** (≈115 MB per hour of continuous speech). With the default `0` (keep
+everything) nothing is ever pruned, so multiply that by your actual speaking
+time; set `VOICE_INPUT_ARCHIVE_KEEP_DAYS` if that is more than you want on disk.
 
 Known boundary: if the worker is `SIGKILL`ed mid-archive (transcription timeout),
 a half-written `recordings/<ts>/` can be left behind. Record-directory pruning

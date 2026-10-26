@@ -185,9 +185,9 @@ systemctl --user enable --now voice-hold.service
 音频照样归档——这正是排查「丢句」时最需要的负样本）、`disabled` 或 `degraded`。
 整条路径包在 try/except 里：归档失败只打一行日志，绝不阻断上屏。
 
-占用估算：16 kHz 单声道 16-bit ≈ 32 KB/s，一分钟语音约 1.9 MB。默认 `0`（全量
-保留）且不清理时，每小时听写约增加 50–60 MB；在意磁盘就给
-`VOICE_INPUT_ARCHIVE_KEEP_DAYS` 设个值。
+占用估算：16 kHz 单声道 16-bit = 32 KB/s，即**每分钟录音约 1.9 MB**（连续说话
+一小时约 115 MB）。默认 `0`（全量保留）不做任何清理，按你的实际说话时长相乘即可；
+在意磁盘就给 `VOICE_INPUT_ARCHIVE_KEEP_DAYS` 设个值。
 
 已知边界：若 worker 在归档过程中被 `SIGKILL`（转写超时），可能留下半写入的
 `recordings/<ts>/`。目录清理只按 `VOICE_INPUT_ARCHIVE_KEEP_DAYS` 判龄，默认值

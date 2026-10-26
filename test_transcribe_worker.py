@@ -398,6 +398,8 @@ class TestArchiveHook(WorkerHarness):
             self.read()
         prune.assert_called_once()
         self.assertEqual(prune.call_args[0][0], self.archive_dir)
+        self.assertEqual(prune.call_args[1]["keep_days"], tw.archive.ARCHIVE_KEEP_DAYS,
+                         "startup prune must forward the configured retention")
 
     def test_prune_skipped_when_disabled(self):
         with mock.patch.object(tw.archive, "ARCHIVE_ENABLED", False):

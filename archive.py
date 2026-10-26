@@ -197,5 +197,6 @@ def prune_recordings(archive_dir: str = None, keep_days: int = 0, *, now=None) -
         if os.path.islink(path) or not os.path.isdir(path):
             continue
         shutil.rmtree(path, ignore_errors=True)
-        removed.append(name)
+        if not os.path.isdir(path):      # rmtree(ignore_errors) can silently fail
+            removed.append(name)
     return removed
