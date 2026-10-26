@@ -212,11 +212,105 @@ class TestEndToEnd(unittest.TestCase):
         import subprocess
         import sys
         root = os.path.dirname(os.path.abspath(__file__))
+        # #44: transcribe_once now archives; keep the E2E run out of the real
+        # recordings directory (and off the 2 MB repro wav).
+        env = dict(os.environ, VOICE_INPUT_ARCHIVE="0")
         result = subprocess.run(
             [sys.executable, os.path.join(root, "transcribe_once.py"), REPRO_WAV],
-            capture_output=True, text=True, timeout=300)
+            capture_output=True, text=True, timeout=300, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         text = result.stdout.strip()
         for marker in ("词曲", "字幕", "Zither"):
             self.assertNotIn(marker, text)
         self.assertLessEqual(text.count("这个"), 8)
+
+
+class TestVadSummary(unittest.TestCase):
+    """#44 A1: pure coverage summary (no faster-whisper import needed)."""
+
+    def test_zero_spans(self):
+        s = vad_trim.vad_summary([], SR * 2, SR)
+        self.assertEqual(s["spans"], 0)
+        self.assertEqual(s["total_s"], 2.0)
+        self.assertEqual(s["kept_s"], 0.0)
+        self.assertEqual(s["kept_ratio"], 0.0)
+        self.assertEqual(s["threshold"], vad_trim.DEFAULT_THRESHOLD)
+        self.assertEqual(s["speech_pad_ms"], vad_trim.DEFAULT_PAD_MS)
+
+    def test_full_coverage(self):
+        s = vad_trim.vad_summary([(0, SR)], SR, SR)
+        self.assertEqual((s["spans"], s["kept_s"], s["kept_ratio"]), (1, 1.0, 1.0))
+
+    def test_partial_coverage(self):
+        s = vad_trim.vad_summary([(0, SR // 2)], SR, SR)
+        self.assertEqual(s["kept_s"], 0.5)
+        self.assertEqual(s["kept_ratio"], 0.5)
+
+    def test_options_are_duck_typed(self):
+        class Options:
+            threshold = 0.35
+            speech_pad_ms = 600
+        s = vad_trim.vad_summary([(0, 100)], 100, SR, Options())
+        self.assertEqual((s["threshold"], s["speech_pad_ms"]), (0.35, 600))
+
+    def test_bad_sample_rate_does_not_divide_by_zero(self):
+        s = vad_trim.vad_summary([(0, 10)], 10, 0)
+        self.assertEqual((s["total_s"], s["kept_s"], s["kept_ratio"]),
+                         (0.0, 0.0, 1.0))
+
+
+class TestStats(unittest.TestCase):
+    """#44 A2: trimmed_wav fills the stats dict for all four states."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="vad-stats-test-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.wav = os.path.join(self.dir, "in.wav")
+        make_wav(self.wav, seconds=1.0)
+        self.src = "unset"
+
+    def detector(self, spans=None, error=None):
+        def _detect(path):
+            if error is not None:
+                raise error
+            return read_frames(path), spans
+        return _detect
+
+    def collect(self, **kw):
+        stats = {}
+        with vad_trim.trimmed_wav(self.wav, stats=stats, log=lambda m: None, **kw) as src:
+            self.src = src
+        return stats
+
+    def test_disabled(self):
+        stats = self.collect(enabled=False, detector=self.detector([(0, SR)]))
+        self.assertEqual(stats, {"status": "disabled"})
+
+    def test_kept_trimmed(self):
+        stats = self.collect(detector=self.detector([(0, SR // 2)]))
+        self.assertEqual(stats["status"], "kept")
+        self.assertEqual((stats["spans"], stats["kept_s"], stats["kept_ratio"]),
+                         (1, 0.5, 0.5))
+        self.assertTrue(self.src.endswith(".wav"))
+
+    def test_kept_passthrough_keeps_original(self):
+        stats = self.collect(detector=self.detector([(0, SR)]))
+        self.assertEqual(stats["status"], "kept")
+        self.assertEqual(stats["kept_ratio"], 1.0)
+        self.assertEqual(self.src, self.wav)
+
+    def test_no_speech(self):
+        stats = self.collect(detector=self.detector([]))
+        self.assertIsNone(self.src)
+        self.assertEqual(stats["status"], "no_speech")
+        self.assertEqual((stats["spans"], stats["kept_s"]), (0, 0.0))
+
+    def test_degraded_unavailable(self):
+        stats = self.collect(detector=self.detector(
+            error=vad_trim.TrimUnavailable("no onnxruntime")))
+        self.assertEqual((stats["status"], stats["reason"]), ("degraded", "unavailable"))
+        self.assertEqual(self.src, self.wav)
+
+    def test_degraded_error(self):
+        stats = self.collect(detector=self.detector(error=ValueError("boom")))
+        self.assertEqual((stats["status"], stats["reason"]), ("degraded", "error"))

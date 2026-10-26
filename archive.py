@@ -5,12 +5,28 @@
 
 import json
 import os
+import re
 import shutil
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 ARCHIVE_DIR = os.path.expanduser("~/.local/share/voice-input/recordings")
 ARCHIVE_ENABLED = os.environ.get("VOICE_INPUT_ARCHIVE", "1") != "0"
+_TS_DIR_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(\d{6})(?:_\d{1,3})?$")
+
+
+def _env_nonneg_int(name, default):
+    """Env value as a non-negative int; missing/garbage/negative -> default."""
+    try:
+        value = int(str(os.environ.get(name, "")).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+# #44: 0 = keep everything (the contract pinned by
+# docs/2026-07-19-audio-archive-design.md §2); >0 prunes record dirs on startup.
+ARCHIVE_KEEP_DAYS = _env_nonneg_int("VOICE_INPUT_ARCHIVE_KEEP_DAYS", 0)
 
 
 def _fsync_dir(path: str) -> None:
@@ -25,7 +41,8 @@ def _fsync_dir(path: str) -> None:
         print(f"[archive] _fsync_dir({path}) failed (non-fatal): {fe}", file=sys.stderr)
 
 
-def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir: str = ARCHIVE_DIR) -> str:
+def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir: str = ARCHIVE_DIR,
+                      *, engine=None, model=None, vad=None, keep_source=False) -> str:
     """归档一条录音。顺序:建目录→写文本→copyfile wav + 校验 + 删源→记索引。
 
     回滚原则(wav 珍贵不可逆,基于 audio_confirmed 标志判断):
@@ -47,6 +64,10 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
     Raises:
         任何 IO 异常向上抛,由调用方捕获(不影响转写主流程)。
     """
+    if not os.path.isfile(wav_path):
+        # #44: raise before makedirs, so a bogus path cannot litter an empty
+        # archive root (the caller's guard tells the user what really happened).
+        raise FileNotFoundError(f"archive: source wav missing: {wav_path}")
     now = datetime.now()
     ts_dir = now.strftime("%Y-%m-%d_%H%M%S")   # fs-safe, 目录名
     ts_iso = now.strftime("%Y-%m-%dT%H:%M:%S")  # ISO, json
@@ -71,6 +92,14 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
         "final": final_text,
         "enhanced": raw_text != final_text,
     }
+    # #44: optional provenance / VAD-decision fields. Absent by default, so
+    # records written by the voice-ptt path keep their original key set.
+    if engine is not None:
+        record["engine"] = engine
+    if model is not None:
+        record["model"] = model
+    if vad is not None:
+        record["vad"] = vad
     audio_dst = os.path.join(rec_dir, "audio.wav")
     audio_confirmed = False  # audio 数据已完整落到 rec_dir(并校验过)
     try:
@@ -94,8 +123,11 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
         except OSError as cse:
             print(f"[archive] copystat failed (non-fatal): {cse}", file=sys.stderr)
         _fsync_dir(rec_dir)  # 让 audio.wav/raw.txt/final.txt 三个新文件条目落盘到 rec_dir(kimi#8)
-        # 5. audio 完整 → 删源(此时 rec_dir 已有完整 audio)
-        os.remove(wav_path)
+        # 5. audio 完整 → 删源(此时 rec_dir 已有完整 audio)。
+        # keep_source=True(#44): 调用方传入的是用户文件(如 transcribe_once 的
+        # CLI 参数),只能拷贝,绝不能删。
+        if not keep_source:
+            os.remove(wav_path)
         # 6. 记索引(flush+fsync);若此步失败,audio_confirmed=True → 保留 rec_dir
         with open(os.path.join(archive_dir, "index.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -109,3 +141,61 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
         # audio_confirmed=True:audio 完整在 rec_dir,绝不删(源已删或还在都不影响音频安全)
         raise
     return rec_dir
+
+
+def archive_result(wav_path: str, raw_text: str, final_text: str, *, engine=None,
+                   model=None, vad=None, archive_dir: str = None, log=None,
+                   keep_source=False) -> bool:
+    """ARCHIVE_ENABLED gate + exception guard around `archive_recording` (#44).
+
+    Returns True when the recording was archived, False when archiving is off
+    or failed. Never raises: a data-infrastructure problem must not break the
+    transcription that is about to reach the user.
+    """
+    if not ARCHIVE_ENABLED:
+        return False
+    log = log or (lambda msg: print(msg, file=sys.stderr))
+    try:
+        archive_recording(wav_path, raw_text, final_text,
+                          archive_dir or ARCHIVE_DIR,
+                          engine=engine, model=model, vad=vad,
+                          keep_source=keep_source)
+        return True
+    except Exception as e:
+        log(f"[archive] failed (non-fatal): {type(e).__name__}: {e}")
+        return False
+
+
+def prune_recordings(archive_dir: str = None, keep_days: int = 0, *, now=None) -> list:
+    """Delete record dirs older than `keep_days`; returns the removed dir names.
+
+    `keep_days` <= 0 (the default) is a no-op, preserving the "keep everything"
+    contract. Only timestamped record directories are touched — `index.jsonl`
+    and anything unrecognised stay as they are (append-only invariant, #44 D7).
+    """
+    if not keep_days or keep_days <= 0:
+        return []
+    root = archive_dir or ARCHIVE_DIR
+    cutoff = (now or datetime.now()) - timedelta(days=keep_days)
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return []
+    removed = []
+    for name in names:
+        match = _TS_DIR_RE.match(name)
+        if not match:
+            continue
+        try:
+            created = datetime.strptime(f"{match.group(1)}_{match.group(2)}",
+                                        "%Y-%m-%d_%H%M%S")
+        except ValueError:
+            continue
+        if created >= cutoff:
+            continue
+        path = os.path.join(root, name)
+        if os.path.islink(path) or not os.path.isdir(path):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        removed.append(name)
+    return removed
