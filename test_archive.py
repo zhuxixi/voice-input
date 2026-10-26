@@ -1,12 +1,18 @@
+import contextlib
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 import wave
+from datetime import datetime
 from unittest import mock
 
-from archive import archive_recording
+import archive
+import transcribe_once as to
+from archive import archive_recording, archive_result, prune_recordings
 
 
 def _make_wav(path):
@@ -133,5 +139,216 @@ class TestArchive(unittest.TestCase):
         self.assertFalse(os.path.exists(wav))  # 源已删
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+class TestMeta(unittest.TestCase):
+    """#44 A3: optional provenance/VAD fields in the index record."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.archive_dir = os.path.join(self.tmp, "recordings")
+
+    def _wav(self, name="in.wav"):
+        p = os.path.join(self.tmp, name)
+        _make_wav(p)
+        return p
+
+    def _first_record(self):
+        line = open(os.path.join(self.archive_dir, "index.jsonl"),
+                    encoding="utf-8").readline()
+        return json.loads(line)
+
+    def test_fields_absent_by_default(self):
+        archive_recording(self._wav(), "x", "x", archive_dir=self.archive_dir)
+        record = self._first_record()
+        self.assertEqual(
+            set(record),
+            {"ts", "dir", "audio", "raw", "final", "enhanced"},
+            "voice-ptt path must keep its original key set")
+
+    def test_keep_source_copies_without_deleting(self):
+        wav = self._wav()
+        rec_dir = archive_recording(wav, "x", "x", archive_dir=self.archive_dir,
+                                    keep_source=True)
+        self.assertTrue(os.path.isfile(os.path.join(rec_dir, "audio.wav")))
+        self.assertTrue(os.path.exists(wav), "keep_source must not delete the input")
+
+    def test_fields_written_when_given(self):
+        vad = {"status": "kept", "threshold": 0.5, "speech_pad_ms": 400,
+               "total_s": 1.2, "kept_s": 1.0, "kept_ratio": 0.833, "spans": 1}
+        archive_recording(self._wav(), "x", "y", archive_dir=self.archive_dir,
+                          engine="npu", model="small-int8-ov", vad=vad)
+        record = self._first_record()
+        self.assertEqual(record["engine"], "npu")
+        self.assertEqual(record["model"], "small-int8-ov")
+        self.assertEqual(record["vad"], vad)
+        self.assertTrue(record["enhanced"])
+
+
+class TestArchiveResult(unittest.TestCase):
+    """#44 A7/A8/D9: the gate + exception guard used by both transcribers."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.archive_dir = os.path.join(self.tmp, "recordings")
+        self.wav = os.path.join(self.tmp, "in.wav")
+        _make_wav(self.wav)
+        self.logs = []
+
+    def log(self, msg):
+        self.logs.append(msg)
+
+    def test_disabled_writes_nothing(self):
+        with mock.patch.object(archive, "ARCHIVE_ENABLED", False):
+            ok = archive_result(self.wav, "x", "x", archive_dir=self.archive_dir,
+                                log=self.log)
+        self.assertFalse(ok)
+        self.assertFalse(os.path.exists(self.archive_dir))
+        self.assertTrue(os.path.exists(self.wav))
+
+    def test_none_archive_dir_falls_back_to_module_default(self):
+        with mock.patch.object(archive, "ARCHIVE_DIR", self.archive_dir):
+            ok = archive_result(self.wav, "x", "x", archive_dir=None, log=self.log)
+        self.assertTrue(ok)
+        self.assertTrue(os.path.isfile(os.path.join(self.archive_dir, "index.jsonl")))
+
+    def test_missing_source_raises_before_creating_root(self):
+        missing = os.path.join(self.tmp, "nope.wav")
+        with self.assertRaises(FileNotFoundError):
+            archive_recording(missing, "x", "x", archive_dir=self.archive_dir)
+        self.assertFalse(os.path.exists(self.archive_dir),
+                         "a bogus path must not create an empty archive root")
+
+    def test_failure_never_raises(self):
+        with mock.patch.object(archive, "archive_recording",
+                               side_effect=OSError("disk full")):
+            ok = archive_result(self.wav, "x", "x", archive_dir=self.archive_dir,
+                                log=self.log)
+        self.assertFalse(ok)
+        self.assertTrue(any("disk full" in line for line in self.logs))
+
+
+class TestPrune(unittest.TestCase):
+    """#44 A4: retention is opt-in and never touches index.jsonl."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.archive_dir = os.path.join(self.tmp, "recordings")
+        os.makedirs(self.archive_dir)
+
+    def _mk(self, name):
+        os.makedirs(os.path.join(self.archive_dir, name), exist_ok=True)
+
+    def test_zero_keep_days_is_a_noop(self):
+        self._mk("2020-01-01_000000")
+        self.assertEqual(prune_recordings(self.archive_dir, keep_days=0), [])
+        self.assertTrue(os.path.isdir(os.path.join(self.archive_dir, "2020-01-01_000000")))
+
+    def test_negative_keep_days_is_a_noop(self):
+        self._mk("2020-01-01_000000")
+        self.assertEqual(prune_recordings(self.archive_dir, keep_days=-1), [])
+
+    def test_removes_only_expired_timestamped_dirs(self):
+        self._mk("2020-01-01_000000")
+        self._mk("2020-01-01_000000_2")          # collision suffix form
+        self._mk("2020-01-09_000000")            # fresh
+        self._mk("notes")                        # unrecognised -> untouched
+        with open(os.path.join(self.archive_dir, "index.jsonl"), "w",
+                  encoding="utf-8") as fh:
+            fh.write('{"ts": "2020-01-01T00:00:00"}\n')
+        removed = prune_recordings(self.archive_dir, keep_days=5,
+                                   now=datetime(2020, 1, 10, 0, 0, 0))
+        self.assertEqual(sorted(removed),
+                         ["2020-01-01_000000", "2020-01-01_000000_2"])
+        self.assertTrue(os.path.isdir(os.path.join(self.archive_dir, "2020-01-09_000000")))
+        self.assertTrue(os.path.isdir(os.path.join(self.archive_dir, "notes")))
+        self.assertTrue(os.path.isfile(os.path.join(self.archive_dir, "index.jsonl")))
+
+    def test_missing_dir_is_not_an_error(self):
+        self.assertEqual(prune_recordings(os.path.join(self.tmp, "nope"), keep_days=1), [])
+
+
+class FakeOnceModel:
+    def __init__(self, text="你好"):
+        self.text = text
+
+    def transcribe(self, wav, language="zh", initial_prompt=None, **kw):
+        seg = type("Seg", (), {"text": self.text})()
+        return [seg], type("Info", (), {"language": language})()
+
+
+class TestTranscribeOnceHook(unittest.TestCase):
+    """#44 A9b/A10: legacy CLI archives (including the no-speech case)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.archive_dir = os.path.join(self.tmp, "recordings")
+        self.wav = os.path.join(self.tmp, "in.wav")
+        _make_wav(self.wav)
+        self.terms_path = os.path.join(self.tmp, "missing-terms.json")
+
+    def fake_trim(self, src):
+        @contextlib.contextmanager
+        def _ctx(path, stats=None, **_kw):
+            if stats is not None:
+                stats.update({"status": "no_speech" if src is None else "kept",
+                              "threshold": 0.5, "speech_pad_ms": 400,
+                              "total_s": 0.01, "kept_s": 0.01,
+                              "kept_ratio": 1.0, "spans": 0 if src is None else 1})
+            yield src
+        return _ctx
+
+    def run_main(self, src, text="你好"):
+        patches = [
+            mock.patch.object(to, "_preamble", lambda: 0),
+            mock.patch.object(to.engine, "build_model", lambda: FakeOnceModel(text)),
+            mock.patch.object(to.vad_trim, "trimmed_wav", self.fake_trim(src)),
+            mock.patch.object(archive, "ARCHIVE_DIR", self.archive_dir),
+            mock.patch.object(archive, "ARCHIVE_ENABLED", True),
+            mock.patch.object(archive, "ARCHIVE_KEEP_DAYS", 0),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return to.main([self.wav], terms_path=self.terms_path)
+
+    def records(self):
+        path = os.path.join(self.archive_dir, "index.jsonl")
+        if not os.path.isfile(path):
+            return []
+        return [json.loads(line) for line in
+                open(path, encoding="utf-8").read().strip().splitlines()]
+
+    def test_speech_is_archived_before_stdout(self):
+        self.assertEqual(self.run_main(self.wav, "你好呀"), 0)
+        records = self.records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["raw"], "你好呀")
+        self.assertEqual(records[0]["vad"]["status"], "kept")
+        self.assertEqual(records[0]["engine"] is not None, True)
+        self.assertTrue(os.path.exists(self.wav),
+                        "the CLI must never delete the file it was given")
+
+    def test_no_speech_is_archived(self):
+        self.assertEqual(self.run_main(None), 0)
+        records = self.records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["raw"], "")
+        self.assertEqual(records[0]["vad"]["status"], "no_speech")
+        self.assertTrue(os.path.exists(self.wav))
+
+
+class TestTranscribeOnceImport(unittest.TestCase):
+    """#44 A13/D10: importing the CLI must not fork or mutate the environment."""
+
+    def test_import_has_no_side_effects(self):
+        env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import os, transcribe_once; print('ok', 'LD_LIBRARY_PATH' in os.environ)"],
+            capture_output=True, text=True, timeout=60, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "ok False")

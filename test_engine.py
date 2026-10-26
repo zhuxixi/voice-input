@@ -598,8 +598,13 @@ class TestNpuAdapter(unittest.TestCase):
 class TestTranscribeOnceEnv(unittest.TestCase):
     """#19 A6: transcribe_once preamble 收敛后输出等价 + npu 缺路径可行动报错。
 
-    干净子进程 import transcribe_once(模块顶层副作用会设置 LD_LIBRARY_PATH),
-    打印结果供比对。沿用本文件既有子进程 harness 内联模式(helper 抽取债挂账)。
+    #44 D10: the preamble moved from import time into `_preamble()` (called by
+    `main()`), so the module is importable and testable. The byte-equality and
+    the actionable NPU error are still asserted — at the function boundary that
+    real callers hit, instead of at import time.
+
+    干净子进程里调 `_preamble()`(它会设置 LD_LIBRARY_PATH),打印结果供比对。
+    沿用本文件既有子进程 harness 内联模式(helper 抽取债挂账)。
     """
 
     REPO = os.path.dirname(os.path.realpath(__file__))
@@ -608,12 +613,15 @@ class TestTranscribeOnceEnv(unittest.TestCase):
     def _import_in_subprocess(self, env_extra):
         code = (
             "import os, sys; sys.path.insert(0, %r);"
-            "import transcribe_once;"
-            "print(os.environ.get('LD_LIBRARY_PATH', ''))" % self.REPO
+            "import transcribe_once as t;"
+            "rc = t._preamble();"
+            "print(os.environ.get('LD_LIBRARY_PATH', ''));"
+            "print('rc', rc)" % self.REPO
         )
         env = {k: v for k, v in os.environ.items()
                if k not in ("LD_LIBRARY_PATH", "VOICE_INPUT_ENGINE",
                             "VOICE_INPUT_MODEL")}
+        env["VOICE_INPUT_ARCHIVE"] = "0"   # #44: never write the real archive
         env.update(env_extra)
         p = subprocess.run([self.VENV_PY, "-c", code],
                            capture_output=True, text=True, env=env)
@@ -629,15 +637,18 @@ class TestTranscribeOnceEnv(unittest.TestCase):
         site = self._venv_site()
         rc, out, err = self._import_in_subprocess({"LD_LIBRARY_PATH": "/opt/keep"})
         self.assertEqual(rc, 0, err)
+        lib_path, preamble_rc = out.splitlines()
+        self.assertEqual(preamble_rc, "rc 0")
         # HEAD 历史串逐字节: f"{site}/nvidia/cublas/lib:{site}/nvidia/cudnn/lib:{site}/nvidia/cuda_nvrtc/lib:{old}"
         self.assertEqual(
-            out,
+            lib_path,
             f"{site}/nvidia/cublas/lib:{site}/nvidia/cudnn/lib:"
             f"{site}/nvidia/cuda_nvrtc/lib:/opt/keep")
 
     def test_transcribe_once_env_npu_missing_path_actionable(self):
         rc, out, err = self._import_in_subprocess({"VOICE_INPUT_ENGINE": "npu"})
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.splitlines()[-1], "rc 1")
         self.assertIn("/usr/lib/x86_64-linux-gnu", err)
         self.assertIn("export LD_LIBRARY_PATH", err)
 
@@ -647,14 +658,18 @@ class TestTranscribeOnceEnv(unittest.TestCase):
             "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu",
         })
         self.assertEqual(rc, 0, err)
-        self.assertIn("/usr/lib/x86_64-linux-gnu", out)
+        lib_path, preamble_rc = out.splitlines()
+        self.assertEqual(preamble_rc, "rc 0")
+        self.assertIn("/usr/lib/x86_64-linux-gnu", lib_path)
 
     def test_transcribe_once_env_cpu_no_nvidia_paths(self):
         # 惰性差异(spec Design #4):cpu 不再设置 nvidia 路径,旧值原样保留
         rc, out, err = self._import_in_subprocess({
             "VOICE_INPUT_ENGINE": "cpu", "LD_LIBRARY_PATH": "/opt/keep"})
         self.assertEqual(rc, 0, err)
-        self.assertEqual(out, "/opt/keep")
+        lib_path, preamble_rc = out.splitlines()
+        self.assertEqual(preamble_rc, "rc 0")
+        self.assertEqual(lib_path, "/opt/keep")
 
 
 class TestTranscribeOnceTerms(unittest.TestCase):
@@ -689,6 +704,7 @@ class TestTranscribeOnceTerms(unittest.TestCase):
         env = {k: v for k, v in os.environ.items()
                if k not in ("LD_LIBRARY_PATH", "VOICE_INPUT_ENGINE",
                             "VOICE_INPUT_MODEL")}
+        env["VOICE_INPUT_ARCHIVE"] = "0"   # #44: never write the real archive
         env.update({"VOICE_INPUT_ENGINE": "cpu", "TERMS_PATH": terms_path})
         p = subprocess.run([self.VENV_PY, "-c", code],
                            capture_output=True, text=True, env=env)

@@ -44,9 +44,10 @@ leaves your machine.
 - **Auto media pause**: pauses playing media (Chrome and other MPRIS players) while
   you record so it doesn't leak into the mic, then resumes it afterwards — via system
   D-Bus, zero extra dependencies
-- **Recording archive**: every recording (audio + transcript) is stored locally under
-  `~/.local/share/voice-input/recordings/` for later review or building an eval set;
-  can be disabled
+- **Recording archive**: every recording (audio + transcript) from both the hold
+daemon and `transcribe_once.py` is stored locally under
+`~/.local/share/voice-input/recordings/` — one directory per recording plus an
+`index.jsonl` index that also records the VAD decision; can be disabled
 - **Autostart**: works with GNOME autostart
 
 ## Requirements
@@ -191,13 +192,38 @@ All settings with their defaults and how to change them:
 
 | Setting | Default | Effect | How to change |
 |---|---|---|---|
-| `VOICE_INPUT_ARCHIVE` | `1` (on) | Archive each recording (audio + transcript) to `~/.local/share/voice-input/recordings/` (one directory per recording + an `index.jsonl` index) | `VOICE_INPUT_ARCHIVE=0 ./voice-ptt.sh` |
+| `VOICE_INPUT_ARCHIVE` | `1` (on) | Archive each recording (original, untrimmed audio + raw/final transcript + VAD decision) to `~/.local/share/voice-input/recordings/` (one directory per recording + an `index.jsonl` index). Covers the hold daemon and `transcribe_once.py` | `VOICE_INPUT_ARCHIVE=0 ./voice-ptt.sh`, or a `systemctl --user edit voice-hold` drop-in |
+| `VOICE_INPUT_ARCHIVE_KEEP_DAYS` | `0` | Retention for archived recordings: `0` = keep everything (default); `N>0` deletes record directories older than N days when a transcriber process starts. `index.jsonl` is never rewritten | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_ARCHIVE_KEEP_DAYS=30` |
 | `VOICE_INPUT_PAUSE_MEDIA` | `1` (on) | Auto-pause MPRIS players (Chrome etc.) while recording, resume after release | `VOICE_INPUT_PAUSE_MEDIA=0 ./voice-ptt.sh` |
 | `~/.config/voice-input/terms.json` | (none) | Custom vocabulary hotwords, see below | Edit the file |
 | `VOICE_INPUT_WAYLAND_METHOD` | `paste` | Wayland text delivery: `paste` = clipboard paste (`wl-copy` + `ydotool` combo), `type` = simulated typing | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_WAYLAND_METHOD=type` |
 | `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | Paste key combo for the Wayland paste method (terminal convention; use `ctrl+v` for apps like VS Code that only bind plain paste) | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_PASTE_COMBO=ctrl+v` |
 | `VOICE_INPUT_RESIDENT` | `1` (on) | Keep a resident transcription worker: the model stays loaded across dictations (prewarmed at daemon start). `0` = legacy per-dictation spawn (model reloaded every dictation) | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_RESIDENT=0` |
 | `VOICE_INPUT_VAD` | `1` (on) | Trim leading/trailing and long internal silence before transcription (Silero VAD bundled with faster-whisper), so Whisper never decodes silence. `0` = legacy behavior | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_VAD=0` |
+
+### Recording archive
+
+The archive is written by the transcriber process itself: each dictation produces
+`recordings/<YYYY-MM-DD_HHMMSS>/` with `audio.wav` (the **original** wav, before
+VAD trimming — so parameters can be re-tuned against it later), `raw.txt` (before
+corrections) and `final.txt` (what was pasted). One line per recording is appended
+to `recordings/index.jsonl`; besides `ts/dir/raw/final/enhanced` it carries
+`engine`, `model` and a `vad` object (`status`, `threshold`, `speech_pad_ms`,
+`total_s`, `kept_s`, `kept_ratio`, `spans`). `vad.status` is one of `kept`,
+`no_speech` (VAD heard nothing — the audio still gets archived, which is exactly
+the negative sample you want when debugging dropped dictations), `disabled`, or
+`degraded`. Everything runs behind a try/except: a failing archive logs one line
+and never blocks dictation.
+
+Budget: 16 kHz mono 16-bit is 32 KB/s, i.e. **~1.9 MB per minute of recorded
+speech** (≈115 MB per hour of continuous speech). With the default `0` (keep
+everything) nothing is ever pruned, so multiply that by your actual speaking
+time; set `VOICE_INPUT_ARCHIVE_KEEP_DAYS` if that is more than you want on disk.
+
+Known boundary: if the worker is `SIGKILL`ed mid-archive (transcription timeout),
+a half-written `recordings/<ts>/` can be left behind. Record-directory pruning
+only removes directories older than `VOICE_INPUT_ARCHIVE_KEEP_DAYS`, so with the
+default `0` such residue stays until you delete it by hand.
 
 ### NPU engine (Intel AI Boost, e.g. Lunar Lake)
 

@@ -13,6 +13,7 @@ import tempfile
 import wave
 
 DEFAULT_PAD_MS = 400
+DEFAULT_THRESHOLD = 0.5   # newly centralised: was faster-whisper's inline default
 ENV_VAD = "VOICE_INPUT_VAD"
 SAMPLE_RATE = 16000
 
@@ -37,19 +38,44 @@ def span_bounds(spans, total_samples):
     return bounds
 
 
+def default_vad_options():
+    """VadOptions carrying this module's defaults (faster-whisper imported lazily)."""
+    from faster_whisper.vad import VadOptions
+    return VadOptions(threshold=DEFAULT_THRESHOLD, speech_pad_ms=DEFAULT_PAD_MS,
+                      min_speech_duration_ms=0)
+
+
+def vad_summary(bounds, total_samples, sample_rate=SAMPLE_RATE, options=None):
+    """Coverage summary for `bounds` (#44). Pure: `options` is duck-typed, not imported."""
+    total = max(0, int(total_samples))
+    kept = sum(stop - start for start, stop in bounds)
+    if sample_rate and sample_rate > 0:
+        total_s = round(total / sample_rate, 2)
+        kept_s = round(kept / sample_rate, 2)
+    else:
+        total_s = kept_s = 0.0
+    return {
+        "threshold": float(getattr(options, "threshold", DEFAULT_THRESHOLD)),
+        "speech_pad_ms": int(getattr(options, "speech_pad_ms", DEFAULT_PAD_MS)),
+        "total_s": total_s,
+        "kept_s": kept_s,
+        "kept_ratio": round(kept / total, 3) if total else 0.0,
+        "spans": len(bounds),
+    }
+
+
 def speech_spans(frames, sample_rate=SAMPLE_RATE, *, vad_options=None):
     """Silero VAD spans (sample indices) for 16-bit mono PCM frames."""
     import numpy as np
-    from faster_whisper.vad import VadOptions, get_speech_timestamps
+    from faster_whisper.vad import get_speech_timestamps
 
     samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-    options = vad_options or VadOptions(speech_pad_ms=DEFAULT_PAD_MS,
-                                        min_speech_duration_ms=0)
+    options = vad_options or default_vad_options()
     timestamps = get_speech_timestamps(samples, options, sampling_rate=sample_rate)
     return [(int(ts["start"]), int(ts["end"])) for ts in timestamps]
 
 
-def spans_from_wav(path):
+def spans_from_wav(path, *, vad_options=None):
     """Return (pcm_frames, spans) for a 16 kHz mono 16-bit wav."""
     with wave.open(path, "rb") as wav:
         if (wav.getframerate() != SAMPLE_RATE or wav.getnchannels() != 1
@@ -59,7 +85,7 @@ def spans_from_wav(path):
                 f"{wav.getframerate()}Hz {wav.getnchannels()}ch "
                 f"{wav.getsampwidth() * 8}-bit")
         frames = wav.readframes(wav.getnframes())
-    return frames, speech_spans(frames, SAMPLE_RATE)
+    return frames, speech_spans(frames, SAMPLE_RATE, vad_options=vad_options)
 
 
 def _write_trimmed(frames, bounds, sample_rate):
@@ -82,15 +108,27 @@ def _write_trimmed(frames, bounds, sample_rate):
 
 
 @contextlib.contextmanager
-def trimmed_wav(path, *, detector=None, enabled=None, log=None):
+def trimmed_wav(path, *, detector=None, enabled=None, log=None, stats=None,
+                vad_options=None):
     """Yield a speech-only wav path, the original path, or None (no speech).
 
     Degrades to the original path on any VAD/format/IO problem; never raises.
+    `stats` (optional dict) is cleared then filled with the decision (#44):
+    status = disabled | kept | no_speech | degraded (+ reason), plus the
+    `vad_summary` fields whenever spans were obtained.
     """
     log = log or (lambda msg: print(msg, file=sys.stderr))
+    if stats is not None:
+        stats.clear()
+
+    def record(**fields):
+        if stats is not None:
+            stats.update(fields)
+
     if enabled is None:
         enabled = os.environ.get(ENV_VAD, "1").strip().lower() not in ("0", "false", "no")
     if not enabled:
+        record(status="disabled")
         yield path
         return
 
@@ -100,10 +138,12 @@ def trimmed_wav(path, *, detector=None, enabled=None, log=None):
         with wave.open(path, "rb") as wav:
             sample_rate = wav.getframerate()
     except TrimUnavailable as exc:
+        record(status="degraded", reason="unavailable")
         log(f"[voice-input] vad: unavailable ({exc}), using original audio")
         yield path
         return
     except Exception as exc:
+        record(status="degraded", reason="error")
         log(f"[voice-input] vad: error ({type(exc).__name__}: {exc}), "
             "using original audio")
         yield path
@@ -114,25 +154,31 @@ def trimmed_wav(path, *, detector=None, enabled=None, log=None):
         bounds = span_bounds(spans, total)
         kept = sum(stop - start for start, stop in bounds)
     except Exception as exc:
+        record(status="degraded", reason="error")
         log(f"[voice-input] vad: error ({type(exc).__name__}: {exc}), "
             "using original audio")
         yield path
         return
+    summary = vad_summary(bounds, total, sample_rate, vad_options)
     if not bounds:
+        record(status="no_speech", **summary)
         yield None
         return
     if kept >= total * 0.99:
+        record(status="kept", **summary)
         yield path
         return
 
     try:
         tmp_path = _write_trimmed(frames, bounds, sample_rate)
     except Exception as exc:
+        record(status="degraded", reason="error")
         log(f"[voice-input] vad: error ({type(exc).__name__}: {exc}), "
             "using original audio")
         yield path
         return
 
+    record(status="kept", **summary)
     log(f"[voice-input] vad: {total / sample_rate:.2f}s -> "
         f"{kept / sample_rate:.2f}s ({len(bounds)} span)")
     try:

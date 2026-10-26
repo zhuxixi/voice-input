@@ -20,6 +20,7 @@ _REPO_DIR = os.path.dirname(os.path.realpath(__file__))
 if _REPO_DIR not in sys.path:
     sys.path.insert(0, _REPO_DIR)
 
+import archive
 import vad_trim
 from terms import (DEFAULT_TERMS_PATH, apply_corrections_counted, build_prompt,
                    build_transcribe_kwargs, load_terms)
@@ -64,17 +65,29 @@ def _preamble(log):
 
 
 def worker_main(conn, *, model_factory=None, terms_loader=load_terms,
-                clock=time.monotonic, log=None):
+                clock=time.monotonic, log=None, archive_dir=None):
     """Serving loop. Returns 0 on protocol EOF, 3 on protocol junk (spec §4.4)."""
     import engine
     log = log or (lambda msg: print(msg, file=sys.stderr))
+    target_dir = archive_dir or archive.ARCHIVE_DIR
+    # #44: retention runs once per worker process, before the ready line so the
+    # harness can cover the wiring with an injected archive_dir.
+    if archive.ARCHIVE_ENABLED:
+        try:
+            removed = archive.prune_recordings(target_dir,
+                                               keep_days=archive.ARCHIVE_KEEP_DAYS)
+            if removed:
+                log(f"[worker] archive: pruned {len(removed)} old recording(s)")
+        except Exception as e:
+            log(f"[worker] archive prune failed (non-fatal): {e}")
     if model_factory is None:
         model_factory = engine.build_model
     t0 = clock()
     model = model_factory()
     eng = _engine_label(engine)
+    model_label = _model_label(engine)
     log(f"[worker] model ready in {clock() - t0:.2f}s (engine={eng})")
-    conn.write(encode_ready(os.getpid(), eng, _model_label(engine), clock() - t0))
+    conn.write(encode_ready(os.getpid(), eng, model_label, clock() - t0))
     conn.flush()
 
     while True:
@@ -105,7 +118,8 @@ def worker_main(conn, *, model_factory=None, terms_loader=load_terms,
                 corrections = cfg.get("corrections")
             except Exception as te:        # degrade, never block transcription
                 log(f"[worker] terms assemble failed, degrade to no-prompt: {te}")
-            with vad_trim.trimmed_wav(wav) as src:
+            stats = {}
+            with vad_trim.trimmed_wav(wav, stats=stats) as src:
                 if src is None:
                     log("[voice-input] vad: no speech, empty transcript")
                     text = ""
@@ -113,9 +127,15 @@ def worker_main(conn, *, model_factory=None, terms_loader=load_terms,
                     segments, _info = model.transcribe(
                         src, language="zh", initial_prompt=prompt, **extra_kw)
                     text = "".join(s.text for s in segments).strip()
+            raw = text
             text, n_fixed = apply_corrections_counted(text, corrections)
             if n_fixed:
                 log(f"[voice-input] corrections: {n_fixed} replaced")
+            # #44 D2: archive BEFORE replying. The parent unlinks the source wav
+            # in its finally block as soon as the text line arrives, so a
+            # reply-first order would race with its own archive copy.
+            archive.archive_result(wav, raw, text, engine=eng, model=model_label,
+                                   vad=stats, archive_dir=target_dir, log=log)
             conn.write(encode_text(rid, text))
         except Exception as e:             # worker stays alive (spec §4.4)
             conn.write(encode_error(rid, f"{type(e).__name__}: {e}"))

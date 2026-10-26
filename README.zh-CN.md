@@ -36,7 +36,7 @@ Linux 语音输入工具 — 按住快捷键录音，松开即转写并输入到
 - **中文及中英混合**：转写固定为 `language="zh"`，支持中文与中英混合口语
 - **自定义词汇（热词）**：通过 `terms.json` 引导专有名词识别；配置损坏自动降级，不阻断转写
 - **自动暂停媒体**：录音时自动暂停正在外放的音乐/视频（Chrome 等支持 MPRIS 的播放器），结束后自动恢复，零新依赖（走系统 D-Bus）
-- **录音归档**：每次录音的音频 + 转写结果归档到本地 `~/.local/share/voice-input/recordings/`，供回溯与评测，可关闭
+- **录音归档**：每次录音的**原始音频** + 转写结果归档到本地 `~/.local/share/voice-input/recordings/`（hold 常驻链路与 `transcribe_once.py` 都覆盖），供回溯与评测，可关闭
 - **开机自启**：支持 GNOME autostart
 
 ## 依赖
@@ -165,13 +165,33 @@ systemctl --user enable --now voice-hold.service
 
 | 配置 | 默认值 | 作用 | 修改方式 |
 |---|---|---|---|
-| `VOICE_INPUT_ARCHIVE` | `1`（开） | 每次录音归档（音频 + 转写文本）到 `~/.local/share/voice-input/recordings/`（每条一目录 + `index.jsonl` 索引） | `VOICE_INPUT_ARCHIVE=0 ./voice-ptt.sh` |
+| `VOICE_INPUT_ARCHIVE` | `1`（开） | 每次录音归档（**原始未裁剪**音频 + 纠正前/后文本 + VAD 决策）到 `~/.local/share/voice-input/recordings/`（每条一目录 + `index.jsonl` 索引）。hold 链路与 `transcribe_once.py` 都生效 | `VOICE_INPUT_ARCHIVE=0 ./voice-ptt.sh`，或 `systemctl --user edit voice-hold` 加 drop-in |
+| `VOICE_INPUT_ARCHIVE_KEEP_DAYS` | `0` | 归档保留期：`0` = 全量保留（默认）；`N>0` 时转写进程启动会删除 N 天前的录音目录。`index.jsonl` 不会被重写 | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_ARCHIVE_KEEP_DAYS=30` |
 | `VOICE_INPUT_PAUSE_MEDIA` | `1`（开） | 录音时自动暂停 MPRIS 播放器（Chrome 等），松手后恢复 | `VOICE_INPUT_PAUSE_MEDIA=0 ./voice-ptt.sh` |
 | `~/.config/voice-input/terms.json` | （无） | 自定义词汇热词，见下 | 编辑该文件 |
 | `VOICE_INPUT_WAYLAND_METHOD` | `paste` | Wayland 上屏方式：`paste` = 剪贴板粘贴（`wl-copy` + `ydotool` 组合键），`type` = 模拟打字 | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_WAYLAND_METHOD=type` |
 | `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | paste 方式的组合键（终端惯例；VS Code 等只认 `ctrl+v` 的应用改这个） | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_PASTE_COMBO=ctrl+v` |
 | `VOICE_INPUT_RESIDENT` | `1`（开） | 常驻转写 worker：模型跨听写常驻（daemon 启动即预热）。`0` = 退回旧的每次听写 spawn（每次都重新加载模型） | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_RESIDENT=0` |
 | `VOICE_INPUT_VAD` | `1`（开） | 转写前用 Silero VAD（模型随 faster-whisper 分发）裁掉首尾与段内长静音，避免 Whisper 解码静音。`0` = 旧行为 | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_VAD=0` |
+
+### 录音归档
+
+归档由转写进程自己写：每次听写生成 `recordings/<YYYY-MM-DD_HHMMSS>/`，内含
+`audio.wav`（**原始**音频，VAD 裁剪前——所以以后还能拿它重调参数）、`raw.txt`
+（纠正前）、`final.txt`（实际上屏的文本）。每条约一行追加到
+`recordings/index.jsonl`，除 `ts/dir/raw/final/enhanced` 外还带 `engine`、`model`
+与 `vad` 对象（`status`、`threshold`、`speech_pad_ms`、`total_s`、`kept_s`、
+`kept_ratio`、`spans`）。`vad.status` 取值 `kept`、`no_speech`（VAD 判定无语音，
+音频照样归档——这正是排查「丢句」时最需要的负样本）、`disabled` 或 `degraded`。
+整条路径包在 try/except 里：归档失败只打一行日志，绝不阻断上屏。
+
+占用估算：16 kHz 单声道 16-bit = 32 KB/s，即**每分钟录音约 1.9 MB**（连续说话
+一小时约 115 MB）。默认 `0`（全量保留）不做任何清理，按你的实际说话时长相乘即可；
+在意磁盘就给 `VOICE_INPUT_ARCHIVE_KEEP_DAYS` 设个值。
+
+已知边界：若 worker 在归档过程中被 `SIGKILL`（转写超时），可能留下半写入的
+`recordings/<ts>/`。目录清理只按 `VOICE_INPUT_ARCHIVE_KEEP_DAYS` 判龄，默认值
+`0` 时这类残留会一直保留，需要手工删。
 
 ### NPU 引擎（Intel AI Boost，如 Lunar Lake）
 
