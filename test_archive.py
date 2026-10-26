@@ -213,6 +213,13 @@ class TestArchiveResult(unittest.TestCase):
         self.assertTrue(ok)
         self.assertTrue(os.path.isfile(os.path.join(self.archive_dir, "index.jsonl")))
 
+    def test_missing_source_raises_before_creating_root(self):
+        missing = os.path.join(self.tmp, "nope.wav")
+        with self.assertRaises(FileNotFoundError):
+            archive_recording(missing, "x", "x", archive_dir=self.archive_dir)
+        self.assertFalse(os.path.exists(self.archive_dir),
+                         "a bogus path must not create an empty archive root")
+
     def test_failure_never_raises(self):
         with mock.patch.object(archive, "archive_recording",
                                side_effect=OSError("disk full")):

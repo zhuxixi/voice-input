@@ -16,10 +16,9 @@ import sys
 # 顶层 import 一律 stdlib-only(#16/#19)，import 期不再有任何副作用：
 # venv 探测 / 引擎校验 / LD_LIBRARY_PATH 注入都收进 _preamble()，由 main() 调用
 # (#44 D10)，这样模块可被测试 import 并直接驱动 main()。
+import archive
 import engine
 import vad_trim
-from archive import (ARCHIVE_ENABLED, ARCHIVE_KEEP_DAYS, archive_result,
-                     prune_recordings)
 from terms import (DEFAULT_TERMS_PATH, apply_corrections, build_prompt,
                    build_transcribe_kwargs, load_terms)
 
@@ -117,9 +116,10 @@ def main(argv=None, terms_path=DEFAULT_TERMS_PATH) -> int:
         corrections = {}
         print(f"[voice-input] terms assemble failed, degrade to no-prompt: {te}",
               file=sys.stderr)
-    if ARCHIVE_ENABLED:
+    # Module attributes (not from-imported snapshots) so tests can patch them.
+    if archive.ARCHIVE_ENABLED:
         try:
-            prune_recordings(keep_days=ARCHIVE_KEEP_DAYS)
+            archive.prune_recordings(keep_days=archive.ARCHIVE_KEEP_DAYS)
         except Exception as pe:                      # prune never breaks a run
             print(f"[archive] prune failed (non-fatal): {pe}", file=sys.stderr)
     model = engine.build_model()
@@ -140,8 +140,8 @@ def main(argv=None, terms_path=DEFAULT_TERMS_PATH) -> int:
     # keep_source=True: `wav` is the caller's file (CLI argument, or a temp path
     # owned — and later deleted — by the hold daemon). Freezing it here would be
     # silent data loss for manual runs.
-    archive_result(wav, raw, text, engine=eng_label, model=model_label, vad=stats,
-                   keep_source=True)
+    archive.archive_result(wav, raw, text, engine=eng_label, model=model_label,
+                           vad=stats, keep_source=True)
     print(text)
     return 0
 

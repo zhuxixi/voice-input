@@ -53,9 +53,9 @@ def archive_recording(wav_path: str, raw_text: str, final_text: str, archive_dir
     copystat(权限/时间等元数据)失败降级为非致命——不影响数据完整性。
 
     Args:
-        wav_path: 待归档的 wav 路径(成功路径会被删源)
+        wav_path: 待归档的 wav 路径(keep_source=False 时成功路径会被删源)
         raw_text: Whisper 原始转写
-        final_text: 最终输出(当前 == raw;未来接纠错后可能不同)
+        final_text: 最终输出(纠错后的上屏文本)
         archive_dir: 归档根目录(测试时可传入临时目录)
 
     Returns:

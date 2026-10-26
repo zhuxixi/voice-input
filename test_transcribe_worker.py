@@ -58,8 +58,12 @@ class WorkerHarness(unittest.TestCase):
         self.addCleanup(self.child.close)
         self.child_file = self.child.makefile("rwb")
         self.done = None
+        # #44: every worker started here archives into a throwaway dir, so tests
+        # can never write to (or prune!) the real ~/.local/share/voice-input/recordings.
+        self.default_archive_dir = os.path.join(self._tmp, "recordings")
 
     def start(self, log=None, archive_dir=None, conn=None):
+        archive_dir = archive_dir or self.default_archive_dir
         def run():
             self.done = tw.worker_main(conn or self.child_file,
                                        model_factory=lambda: self.model,
@@ -262,7 +266,8 @@ class TestRealProcessEof(unittest.TestCase):
         parent, child = socket.socketpair()
         proc = subprocess.Popen(
             [sys.executable, driver, "--protocol-fd", str(child.fileno())],
-            pass_fds=(child.fileno(),), stdin=subprocess.DEVNULL)
+            pass_fds=(child.fileno(),), stdin=subprocess.DEVNULL,
+            env=dict(os.environ, VOICE_INPUT_ARCHIVE="0"))   # #44: no real writes
         child.close()
         with parent.makefile("rwb") as f:
             self.assertEqual(wp.parse_line(f.readline())["event"], "ready")
