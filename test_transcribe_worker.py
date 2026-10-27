@@ -407,3 +407,73 @@ class TestArchiveHook(WorkerHarness):
                 self.start(archive_dir=self.archive_dir)
                 self.read()
         prune.assert_not_called()
+
+
+class SeqModel:
+    """Returns queued texts in order and records every transcribe call."""
+
+    def __init__(self, *texts):
+        self.texts = list(texts)
+        self.calls = []
+
+    def transcribe(self, wav, language="zh", initial_prompt=None, **kw):
+        self.calls.append({"wav": wav, "language": language,
+                           "initial_prompt": initial_prompt, **kw})
+        text = self.texts.pop(0) if self.texts else ""
+        segment = type("Seg", (), {"text": text})()
+        return [segment], type("Info", (), {"language": language})()
+
+
+ECHO_TERMS = '{"terms": ["Zima", "DeepSeek", "GitHub", "Kimi"]}'
+ECHO_TEXT = "、".join(["Zima", "DeepSeek", "GitHub", "Kimi"] * 19)
+
+
+class TestEchoGuard(WorkerHarness):
+    """#43 A10: worker drops the prompt and retries when the output is an echo."""
+
+    def setUp(self):
+        super().setUp()
+        with open(self.terms_path, "w", encoding="utf-8") as fh:
+            fh.write(ECHO_TERMS)
+        self.archive_dir = os.path.join(self._tmp, "recordings")
+        self.wav = os.path.join(self._tmp, "dictation.wav")
+        _write_wav(self.wav)
+
+    def trim_to(self, src):
+        @contextlib.contextmanager
+        def fake(path, stats=None, **kwargs):
+            if stats is not None:
+                stats.update({"status": "kept", "threshold": 0.3,
+                              "speech_pad_ms": 400, "total_s": 0.2,
+                              "kept_s": 0.2, "kept_ratio": 1.0, "spans": 1})
+            yield src
+        return mock.patch.object(tw.vad_trim, "trimmed_wav", fake)
+
+    def records(self):
+        path = os.path.join(self.archive_dir, "index.jsonl")
+        if not os.path.isfile(path):
+            return []
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh.read().strip().splitlines()]
+
+    def test_echo_is_retried_without_prompt(self):
+        self.model = SeqModel(ECHO_TEXT, "正常结果")
+        self.start(archive_dir=self.archive_dir)
+        self.read()
+        with self.trim_to(self.wav):
+            self.parent.write(wp.encode_request(1, self.wav))
+            self.parent.flush()
+            self.assertEqual(self.read(), {"id": 1, "text": "正常结果"})
+        self.assertEqual(len(self.model.calls), 2)
+        self.assertIsNone(self.model.calls[1]["initial_prompt"])
+        self.assertEqual(self.records()[0]["vad"]["echo_guard"], "retried")
+
+    def test_persistent_echo_is_dropped(self):
+        self.model = SeqModel(ECHO_TEXT, ECHO_TEXT)
+        self.start(archive_dir=self.archive_dir)
+        self.read()
+        with self.trim_to(self.wav):
+            self.parent.write(wp.encode_request(1, self.wav))
+            self.parent.flush()
+            self.assertEqual(self.read(), {"id": 1, "text": ""})
+        self.assertEqual(self.records()[0]["vad"]["echo_guard"], "dropped")

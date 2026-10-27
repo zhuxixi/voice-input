@@ -179,3 +179,92 @@ def build_transcribe_kwargs(cfg: dict) -> dict:
         kw["hotwords"] = hotwords
     # 其他类型(int/dict/bool)及空值不传:faster-whisper hotwords 是 Optional[str],非 str 经 .strip() 崩
     return kw
+
+
+# --- prompt-echo guard (#43) ------------------------------------------------
+# 被 VAD 裁剩的极短残片会让解码器「回读」initial_prompt,把词表词循环输出
+# (2026-10-24 实测: Zima/DeepSeek/GitHub/Kimi ×19)。判定纯文本特征,不依赖音频。
+ECHO_SINGLE_MIN = 4      # 单个词表词出现次数
+ECHO_MULTI_MIN = 2       # 多个词表词各自出现次数
+ECHO_SHORT_TEXT = 60     # 多词情形的文本长度上限(列举通常远短于此)
+
+
+def _term_hits(text: str, terms) -> list:
+    """按出现顺序返回命中的词表词(长词优先匹配,不重叠)。
+
+    纯 ASCII 词加词边界,与 `apply_corrections_counted` 的口径一致:
+    否则 `AI` 会命中 email/said,`Go` 会命中 Google,进而误判回声。
+    """
+    lowered = text.lower()
+    ordered = sorted({str(t).strip() for t in terms if str(t).strip()},
+                     key=len, reverse=True)
+    if not ordered:
+        return []
+    pieces = []
+    for term in ordered:
+        escaped = re.escape(term.lower())
+        if _ASCII_WORD_KEY.match(term):
+            escaped = rf"(?<![a-z0-9_-]){escaped}(?![a-z0-9_-])"
+        pieces.append(escaped)
+    pattern = re.compile("|".join(pieces))
+    hits = []
+    pos = 0
+    while True:
+        match = pattern.search(lowered, pos)
+        if not match:
+            return hits
+        hits.append(match.group(0))
+        pos = match.end()
+
+
+def _is_periodic(sequence: list) -> bool:
+    """True when the whole sequence is a repetition of a shorter block (>= 2x)."""
+    size = len(sequence)
+    for period in range(1, size // 2 + 1):
+        if size % period:
+            continue
+        if all(sequence[i] == sequence[i - period] for i in range(period, size)):
+            return True
+    return False
+
+
+def hotword_dominated(text, terms) -> bool:
+    """True when almost nothing is left after removing the hotword hits.
+
+    Used before dropping an echoed transcript: a 19x hotspot loop leaves only
+    punctuation behind, while a real sentence that happens to mention a hotword
+    four times keeps its Chinese/English words.
+    """
+    hits = _term_hits(text, terms)
+    if not hits:
+        return False
+    residual = text.lower()
+    for hit in hits:
+        residual = residual.replace(hit, " ", 1)
+    residual = re.sub(r"[\W_]+", "", residual)
+    return len(residual) <= max(3, int(0.2 * len(text)))
+
+
+def looks_like_prompt_echo(text, terms) -> bool:
+    """Heuristic: did the decoder read the hotword prompt back instead of audio?
+
+    Fires when a) one hotword repeats >= 4 times, b) two or more hotwords repeat
+    >= 2 times each in a short text, or c) the hotword sequence is periodic.
+    Genuine enumeration ("Zima, DeepSeek, GitHub, Kimi", one hit each) stays False.
+    """
+    if not text or not terms:
+        return False
+    hits = _term_hits(text, terms)
+    if not hits:
+        return False
+    counts = {}
+    for hit in hits:
+        counts[hit] = counts.get(hit, 0) + 1
+    if max(counts.values()) >= ECHO_SINGLE_MIN:
+        return True
+    repeated = [term for term, count in counts.items() if count >= ECHO_MULTI_MIN]
+    if len(repeated) >= 2 and len(text) < ECHO_SHORT_TEXT:
+        return True
+    if len(hits) >= 2 * ECHO_MULTI_MIN and _is_periodic(hits):
+        return True
+    return False

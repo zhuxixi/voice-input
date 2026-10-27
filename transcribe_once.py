@@ -19,6 +19,7 @@ import sys
 import archive
 import engine
 import vad_trim
+from transcribe_guard import transcribe_guarded
 from terms import (DEFAULT_TERMS_PATH, apply_corrections, build_prompt,
                    build_transcribe_kwargs, load_terms)
 
@@ -108,12 +109,14 @@ def main(argv=None, terms_path=DEFAULT_TERMS_PATH) -> int:
     # 同构;load_terms/build_* 内部已降级,这里是双保险)(#27)
     try:
         cfg = load_terms(terms_path)
-        prompt = build_prompt(cfg.get("terms", []))
+        terms_list = cfg.get("terms", [])
+        prompt = build_prompt(terms_list)
         extra_kw = build_transcribe_kwargs(cfg)
         corrections = cfg.get("corrections", {})
     except Exception as te:
         prompt, extra_kw = None, {}
         corrections = {}
+        terms_list = []
         print(f"[voice-input] terms assemble failed, degrade to no-prompt: {te}",
               file=sys.stderr)
     # Module attributes (not from-imported snapshots) so tests can patch them.
@@ -124,16 +127,19 @@ def main(argv=None, terms_path=DEFAULT_TERMS_PATH) -> int:
             print(f"[archive] prune failed (non-fatal): {pe}", file=sys.stderr)
     model = engine.build_model()
     stats = {}
+    text, mode = "", None
     with vad_trim.trimmed_wav(wav, stats=stats) as src:
         if src is None:
             # #44 D5: an empty transcript still gets archived — a "VAD heard
             # nothing" sample is exactly the negative evidence #43 needs.
             print("[voice-input] vad: no speech, empty transcript", file=sys.stderr)
-            text = ""
         else:
-            segments, info = model.transcribe(src, language="zh",
-                                              initial_prompt=prompt, **extra_kw)
-            text = "".join(s.text for s in segments).strip()
+            text, mode = transcribe_guarded(
+                model, src, prompt=prompt, extra_kw=extra_kw,
+                terms=terms_list,
+                log=lambda msg: print(msg, file=sys.stderr))
+    if mode is not None:
+        stats["echo_guard"] = mode
     raw = text
     text = apply_corrections(raw, corrections)
     eng_label, model_label = _labels()

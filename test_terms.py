@@ -388,5 +388,62 @@ class TestReviewHardening(unittest.TestCase):
         self.assertIn("/fake/ov/small-int8-ov", seen["pat"])
 
 
+class TestPromptEcho(unittest.TestCase):
+    """#43 A6: hotword prompt-echo detection (pure text, no audio)."""
+
+    TERMS = ["Zima", "DeepSeek", "GitHub", "Kimi"]
+
+    def test_loop_of_nineteen(self):
+        text = "、".join(self.TERMS * 19)
+        self.assertTrue(terms.looks_like_prompt_echo(text, self.TERMS))
+
+    def test_genuine_enumeration_once(self):
+        self.assertFalse(terms.looks_like_prompt_echo(
+            "Zima、DeepSeek、GitHub、Kimi", self.TERMS))
+
+    def test_normal_sentence_with_hotwords(self):
+        self.assertFalse(terms.looks_like_prompt_echo(
+            "帮我看一下 GitHub 上那个 issue 的根因，还有 Zima 的 PR", self.TERMS))
+
+    def test_single_term_repeated_twice_is_not_echo(self):
+        self.assertFalse(terms.looks_like_prompt_echo(
+            "GitHub 上的 GitHub 仓库", self.TERMS))
+
+    def test_single_term_repeated_four_times(self):
+        self.assertTrue(terms.looks_like_prompt_echo(
+            "GitHub GitHub GitHub GitHub 看一下", self.TERMS))
+
+    def test_two_terms_twice_in_short_text(self):
+        self.assertTrue(terms.looks_like_prompt_echo(
+            "Zima Kimi Zima Kimi", self.TERMS))
+
+    def test_periodic_sequence(self):
+        self.assertTrue(terms.looks_like_prompt_echo(
+            "、".join(self.TERMS * 2), self.TERMS))
+
+    def test_ascii_terms_respect_word_boundaries(self):
+        # "AI" must not match email/said/detail/again (#43 review P1-1)
+        self.assertFalse(terms.looks_like_prompt_echo(
+            "我发了 email，said 一句，detail 很长，again", ["AI"]))
+        self.assertTrue(terms.looks_like_prompt_echo(
+            "AI AI AI AI 又是 AI", ["AI"]))
+
+    def test_long_periodic_sequence_only_rule_c(self):
+        # 3 rounds of 4 terms: max count 3 (<4) and len > 60 -> only rule (c) fires
+        text = "、".join(self.TERMS * 3) + "，" + "这是一段正常长度的中文补充说明用来超过长度上限"
+        self.assertTrue(terms.looks_like_prompt_echo(text, self.TERMS))
+
+    def test_hotword_dominated(self):
+        self.assertTrue(terms.hotword_dominated("、".join(self.TERMS * 19), self.TERMS))
+        self.assertFalse(terms.hotword_dominated(
+            "DeepSeek 的 API 多少钱，DeepSeek 和 Kimi 比怎么样，"
+            "DeepSeek 的模型多大，DeepSeek 上下文多长", self.TERMS))
+
+    def test_empty_inputs(self):
+        self.assertFalse(terms.looks_like_prompt_echo("", self.TERMS))
+        self.assertFalse(terms.looks_like_prompt_echo("Zima Zima Zima Zima", []))
+        self.assertFalse(terms.looks_like_prompt_echo("随便说点什么", self.TERMS))
+
+
 if __name__ == "__main__":
     unittest.main()

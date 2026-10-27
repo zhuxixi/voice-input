@@ -22,6 +22,7 @@ if _REPO_DIR not in sys.path:
 
 import archive
 import vad_trim
+from transcribe_guard import transcribe_guarded
 from terms import (DEFAULT_TERMS_PATH, apply_corrections_counted, build_prompt,
                    build_transcribe_kwargs, load_terms)
 from worker_protocol import (ProtocolError, encode_error, encode_ready, encode_text,
@@ -111,22 +112,26 @@ def worker_main(conn, *, model_factory=None, terms_loader=load_terms,
         try:
             prompt, extra_kw = None, {}
             corrections = None
+            terms_list = []
             try:
                 cfg = terms_loader(DEFAULT_TERMS_PATH)
-                prompt = build_prompt(cfg.get("terms", []))
+                terms_list = cfg.get("terms", [])
+                prompt = build_prompt(terms_list)
                 extra_kw = build_transcribe_kwargs(cfg)
                 corrections = cfg.get("corrections")
             except Exception as te:        # degrade, never block transcription
                 log(f"[worker] terms assemble failed, degrade to no-prompt: {te}")
             stats = {}
+            text, mode = "", None
             with vad_trim.trimmed_wav(wav, stats=stats) as src:
                 if src is None:
                     log("[voice-input] vad: no speech, empty transcript")
-                    text = ""
                 else:
-                    segments, _info = model.transcribe(
-                        src, language="zh", initial_prompt=prompt, **extra_kw)
-                    text = "".join(s.text for s in segments).strip()
+                    text, mode = transcribe_guarded(
+                        model, src, prompt=prompt, extra_kw=extra_kw,
+                        terms=terms_list, log=log)
+            if mode is not None:
+                stats["echo_guard"] = mode
             raw = text
             text, n_fixed = apply_corrections_counted(text, corrections)
             if n_fixed:

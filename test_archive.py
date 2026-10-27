@@ -341,6 +341,79 @@ class TestTranscribeOnceHook(unittest.TestCase):
         self.assertTrue(os.path.exists(self.wav))
 
 
+ECHO_TERMS = {"terms": ["Zima", "DeepSeek", "GitHub", "Kimi"]}
+ECHO_TEXT = "、".join(["Zima", "DeepSeek", "GitHub", "Kimi"] * 19)
+
+
+class SeqOnceModel:
+    def __init__(self, *texts):
+        self.texts = list(texts)
+        self.calls = []
+
+    def transcribe(self, wav, language="zh", initial_prompt=None, **kw):
+        self.calls.append({"initial_prompt": initial_prompt})
+        text = self.texts.pop(0) if self.texts else ""
+        return [type("Seg", (), {"text": text})()], None
+
+
+class TestTranscribeOnceEcho(unittest.TestCase):
+    """#43 A11: the CLI applies the same echo guard."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.archive_dir = os.path.join(self.tmp, "recordings")
+        self.wav = os.path.join(self.tmp, "in.wav")
+        _make_wav(self.wav)
+        self.terms_path = os.path.join(self.tmp, "terms.json")
+        with open(self.terms_path, "w", encoding="utf-8") as fh:
+            json.dump(ECHO_TERMS, fh, ensure_ascii=False)
+
+    @contextlib.contextmanager
+    def fake_trim(self, path, stats=None, **_kw):
+        if stats is not None:
+            stats.update({"status": "kept", "threshold": 0.3, "speech_pad_ms": 400,
+                          "total_s": 0.01, "kept_s": 0.01, "kept_ratio": 1.0,
+                          "spans": 1})
+        yield path
+
+    def run_main(self, model):
+        patches = [
+            mock.patch.object(to, "_preamble", lambda: 0),
+            mock.patch.object(to.engine, "build_model", lambda: model),
+            mock.patch.object(to.vad_trim, "trimmed_wav", self.fake_trim),
+            mock.patch.object(archive, "ARCHIVE_DIR", self.archive_dir),
+            mock.patch.object(archive, "ARCHIVE_ENABLED", True),
+            mock.patch.object(archive, "ARCHIVE_KEEP_DAYS", 0),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        import contextlib as _ctx
+        import io
+        buffer = io.StringIO()
+        with _ctx.redirect_stdout(buffer):
+            rc = to.main([self.wav], terms_path=self.terms_path)
+        return rc, buffer.getvalue().strip()
+
+    def records(self):
+        with open(os.path.join(self.archive_dir, "index.jsonl"), encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh]
+
+    def test_echo_retried_without_prompt(self):
+        model = SeqOnceModel(ECHO_TEXT, "正常结果")
+        rc, out = self.run_main(model)
+        self.assertEqual((rc, out), (0, "正常结果"))
+        self.assertIsNone(model.calls[1]["initial_prompt"])
+        self.assertEqual(self.records()[0]["vad"]["echo_guard"], "retried")
+
+    def test_persistent_echo_dropped(self):
+        model = SeqOnceModel(ECHO_TEXT, ECHO_TEXT)
+        rc, out = self.run_main(model)
+        self.assertEqual((rc, out), (0, ""))
+        self.assertEqual(self.records()[0]["vad"]["echo_guard"], "dropped")
+
+
 class TestTranscribeOnceImport(unittest.TestCase):
     """#44 A13/D10: importing the CLI must not fork or mutate the environment."""
 
