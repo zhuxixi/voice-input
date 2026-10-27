@@ -216,8 +216,10 @@ The hotword list is injected as Whisper's `initial_prompt`, and a very short fra
 can make the decoder read that prompt back instead of transcribing (observed: the same
 four hotwords nineteen times). If a transcript repeats a hotword ≥4 times — or repeats
 several of them in a short text, or repeats the hotword sequence — it is treated as an
-echo: the prompt is dropped and the audio is transcribed again; if the echo persists the
-result is empty rather than a page of hotwords. The decision is recorded in the archive
+echo: the prompt (and any `hotwords`) is dropped and the audio is transcribed again; if
+the echo persists **and the text is left with little beyond the hotwords themselves**, the
+result is empty rather than a page of hotwords — a real sentence that merely repeats a
+hotword keeps its text. The decision is recorded in the archive
 index as `vad.echo_guard` (`none` / `retried` / `dropped`).
 
 ### Recording archive
