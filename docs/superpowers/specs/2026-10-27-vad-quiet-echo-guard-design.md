@@ -23,11 +23,11 @@ Silero VAD 的默认 `threshold=0.5` 对两类真实语音失效，另外热词 
 |---|---|---|---|
 | D1 | 新增 `VOICE_INPUT_VAD_THRESHOLD`，**默认 0.5 → 0.3** | 分型 A 唯一有效旋钮；0.35 仍 63%，0.25 无额外收益 | 保持 0.5 + 只做重试：分型 A 靠重试要求「整条无 span」，而 A 型是有 span 但被切短，重试不会触发 |
 | D2 | 新增 `VOICE_INPUT_VAD_PAD_MS` / `VOICE_INPUT_VAD_MIN_SILENCE_MS`，**默认值不动**（400 / 2000） | 只把现值显式化，为后续调参留口；本轮无证据支持改默认 | 借机调 pad 到 600：`kept_ratio` 已 96%，无收益 |
-| D3 | 分型 B 用**能量门 + 低阈值重跑**：`no_speech` 且录音 RMS > `ENERGY_FLOOR_DBFS = −58` 时，用 `threshold=0.1` 再跑一次 | 气声与底噪之间有 7 dB 可判区间；Silero 对气声概率 ≤0.08，只能靠「降得足够低」+「确认不是静音」 | 直接对 `no_speech` 无条件重跑：纯静音会重跑，浪费且增加误判面；切成两个模型：引入新权重，超出范围 |
+| D3 | 分型 B 用**能量门 + 低阈值重跑**：`no_speech` 且**响亮帧数** ≥ `MIN_LOUD_FRAMES=5`（20 ms/帧，均高于 `ENERGY_FLOOR_DBFS = −58`）时，用 `threshold=0.1` 再跑一次；且仅当 `0.1 < 当前阈值` 才重跑 | 气声与底噪之间有 7 dB 可判区间；Silero 对气声概率 ≤0.08，只能靠「降得足够低」+「确认不是静音」 | 直接对 `no_speech` 无条件重跑：纯静音会重跑，浪费且增加误判面；切成两个模型：引入新权重，超出范围 |
 | D4 | 重跑**只在默认 detector 路径**生效（`detector` 注入时跳过） | `detector` 是固定参数的测试注入点，语义是「已算好的 span」；重跑需要能换参数的检测器，混用会让测试失真 | 给 detector 加 `vad_options` 参数：破坏既有注入契约（`test_vad_trim.py` 两个测试类共 18 处注入（TestTrimmedWav 12 + TestStats 6）） |
 | D5 | 语音检测与能量计算都留在 `vad_trim`，**RMS 用 stdlib 实现**（`array('h')`），不引入 numpy 到该模块顶层 | 维持 `vad_trim` 顶层 stdlib-only 的既有契约（`voice_hold` 侧依赖此性质） | 用 numpy 算 RMS：`vad_trim` 顶层会被迫 import 三方库 |
 | D6 | 词表回声判定做成 `terms.looks_like_prompt_echo(text, terms)` **纯函数** | 可单测、无 IO；判定与 prompt 构造同属 `terms` 的关注点 | 放 worker 内联：两处调用点重复 |
-| D7 | 回声处置 = **丢 `initial_prompt` 重转一次**；若重转仍命中则返回空串 | 回声根因是 prompt 被回读，去掉 prompt 是对症下药；仍命中说明残片太短，宁可不出字也不能灌词表 | 直接返回空串：丢掉可能本来可用的内容；调 `repetition_penalty`：#32 已证会压坏正常重复 |
+| D7 | 回声处置 = **丢 `initial_prompt`（及 `hotwords`）重转一次**；重转仍命中且文本**由热词主导**才返回空串，否则保留重转结果 | 回声根因是 prompt 被回读，去掉 prompt 是对症下药；仍命中说明残片太短，宁可不出字也不能灌词表 | 直接返回空串：丢掉可能本来可用的内容；调 `repetition_penalty`：#32 已证会压坏正常重复 |
 | D8 | 重转逻辑抽成新模块 `transcribe_guard.py::transcribe_guarded(...)`，worker 与 `transcribe_once` 共用 | 两处调用点同构，避免复制；可注入 fake model 单测 | 各自内联：行为容易漂 |
 | D9 | stats 增 `retried`（bool）与 `echo_guard`（`none`/`retried`/`dropped`） | 排障时需要知道「这条是被重跑/熔断过的」，否则事后无法解释静默空串 | 只打日志：归档里查不到 |
 
@@ -84,6 +84,8 @@ def rms_dbfs(frames: bytes) -> float
 def spans_from_wav(path, *, vad_options=None)     # 默认 vad_options_from_env()
 
 @contextmanager
+def loud_frame_count(frames, floor_dbfs=ENERGY_FLOOR_DBFS, frame_ms=LOUD_FRAME_MS) -> int
+
 def trimmed_wav(path, *, detector=None, enabled=None, log=None, stats=None,
                 vad_options=None)
     """`vad_options=None` 时**在 try 内部**调 vad_options_from_env()（#43 D3 的接线点）。
@@ -91,10 +93,11 @@ def trimmed_wav(path, *, detector=None, enabled=None, log=None, stats=None,
 ```
 
 `stats` 契约（在 #44 基础上追加）：
-- `retried`: bool，**只在进入检测路径（`kept` / `no_speech`）时出现**；`disabled` / `degraded` 不写该键
+- `retried`: bool，**只在进入检测路径（`kept` / `no_speech`）时出现**；`disabled` / `degraded` 不写该键。
+  语义是「尝试过重跑」（重跑过但仍是空也记 True），这样归档能区分「没重跑」与「重跑无效」
   （`test_vad_trim.TestStats.test_disabled` 对该 dict 做精确相等断言，写键会破它）
 - `echo_guard`: `"none"` / `"retried"` / `"dropped"`，**只在调用过 `transcribe_guarded` 时写**
-  （即 `kept` 与 `degraded` 两条路径有；`no_speech` 没有音频可转、`disabled` 由开关短路，两者都不写该键）
+  （`kept`、`degraded`、`disabled` 三条路径都会转写 → 都会写；只有 `no_speech` 没有音频可转、不写）
 - 重跑发生时 `retried=True`，且 `threshold` 记录**实际生效**的重跑阈值（0.1）
 - 其余字段语义不变
 
@@ -109,6 +112,9 @@ ECHO_SINGLE_MIN = 4        # 单词表词出现次数阈值
 ECHO_MULTI_MIN = 2         # 多词各出现次数阈值
 ECHO_SHORT_TEXT = 60       # 多词情形的文本长度上限
 
+def hotword_dominated(text, terms) -> bool
+    """去掉热词命中后剩下的实义字符 <= max(3, 20% 原长) → 文本由热词主导。"""
+
 def looks_like_prompt_echo(text, terms) -> bool
     """命中任一条即判回声：
        a) 某个词表词出现 >= 4 次；
@@ -117,16 +123,19 @@ def looks_like_prompt_echo(text, terms) -> bool
        空 text / 空 terms → False。大小写不敏感（词表含英文）。"""
 ```
 
-判定用**子串计数**而非分词（中文无空格）；词表词按长度降序匹配以避免短词吃掉长词。真实列举（每个词一次）不触发。
+判定用**子串计数**而非分词（中文无空格）；词表词按长度降序匹配以避免短词吃掉长词。
+纯 ASCII 词加词边界（与 `apply_corrections_counted` 同口径），否则 `AI` 会命中 `email`/`said`。
+真实列举（每个词一次）不触发。
 
 ### 4.3 `transcribe_guard.py`（新增，stdlib-only）
 
 ```python
 def transcribe_guarded(model, src, *, prompt, extra_kw, terms, log) -> tuple[str, str]
     """首转；若 prompt 非空且 looks_like_prompt_echo：
-       1. log 一行；丢 prompt 重转一次（其余 kwargs 不变）
-       2. 重转结果仍命中 → 返回 ""
-       3. 否则返回重转结果
+       1. log 一行；丢 prompt 与 hotwords 重转一次（这两个都是 prompt 式条件）
+       2. 重转仍命中且 hotword_dominated(重转结果) → 返回 ""
+       3. 重转仍命中但文本由真实内容主导 → 保留重转结果（`mode="retried"`）
+       4. 重转不命中 → 返回重转结果
        无回声 → 返回首转结果，不额外调用模型。"""
 ```
 
@@ -208,7 +217,7 @@ def transcribe_guarded(model, src, *, prompt, extra_kw, terms, log) -> tuple[str
 |---|---|---|
 | R1 | 阈值降到 0.3 后，背景噪声更容易被当语音 → 幻觉回升 | 现有样本 0% 误报；上线后靠归档的 `kept_ratio` + 静默样本监控；必要时 `VOICE_INPUT_VAD_THRESHOLD=0.5` 一键回退 |
 | R2 | 气声重跑（0.1）可能把噪声当语音，产生垃圾文本 | 能量门（−58 dBFS）挡掉纯静音；气声本身就该出字，垃圾文本由回声/纠错层兜底 |
-| R3 | 回声判定的假阳性（用户真的重复一个热词 ≥4 次） | 只在 `prompt` 非空时判定；阈值 4 次高于正常口吃重复；假阳性的代价是「丢 prompt 重转一次」而非丢内容 |
+| R3 | 回声判定的假阳性（用户真的重复一个热词 ≥4 次） | 只在 `prompt` 非空时判定，且措辞重复只是触发**重转**；是否丢弃由 `hotword_dominated` 决定——真实句子去掉热词后仍有大量实义字符，会保留。最坏情况是长文里热词占绝对多数被丢一句，已写进 README |
 | R4 | −58 dBFS 门槛样本不足（1 条气声 + 1 条静音） | 写成常量并文档化；补录静音样本后可调；实现不依赖精确值（0.1 重跑 + 能量门双重条件） |
 | R5 | `transcribe_guarded` 返回 tuple 改动两处调用点 | 两处都有完整测试覆盖；类型变化在 PR 内一次到位 |
 | R7 | `voice-ptt.py`（X11）获得阈值/重跑收益但无 echo guard | §6/§4.4 显式声明的边界；该链路在本机无法测试，接未测代码风险更大。7700K 真机验证时若出现 19 遍循环，再单独立项 |
@@ -220,3 +229,27 @@ def transcribe_guarded(model, src, *, prompt, extra_kw, terms, log) -> tuple[str
 1. `feat(vad): threshold env + energy-gated retry (#43)` — `vad_trim.py` + 测试
 2. `feat(terms): prompt-echo guard (#43)` — `terms.py`、`transcribe_guard.py` + 测试
 3. `feat(vad): wire guard into worker + CLI (#43)` — 两处调用点、README 双语 + 测试
+
+
+## 8b. 实施期发现（记录在案）
+
+| 项 | 发现 | 处置 |
+|---|---|---|
+| 系统解释器下的测试 | `vad_options_from_env()` 需要 import `VadOptions`，在无 faster-whisper 的系统解释器里会 ImportError；而 `detector` 注入路径本来不需要它 | 新增 stdlib `_PlainOptions` 兜底 + `_resolve_options(vad_options, injected)`：注入 detector 时用兜底对象；默认路径构造失败也降级到它（真实检测仍会因缺 faster-whisper 走 degraded）。`TestOptionsFromEnv` 改为 `skipUnless(HAS_VAD)` |
+| 重跑阈值 0.1 救不了气声 | A14 实测：`2026-10-27_230459`（3.45s，RMS −54.3 dBFS）在 0.1 下仍 0 覆盖；逐档实测 0.08 → 0%、**0.05 → 32.4%**、0.03 → 52.3% | 维持 F2 的 0.1（与 spec 既定「仍无 span 则保持空」一致）。气声列为**已知边界**：`VOICE_INPUT_VAD=0` 实测该样本可转出「Hello,能不能听到我说话?Hello,…」，但 0.05/0.03 级阈值会把安静房间噪声当语音，需先用归档里的噪声样本评估，不在本次扩大 |
+| 分型 A 实测恢复 | `2026-10-27_230451`（6.91s）在 0.3 下保留 **6.61s / 95.7%**（0.5 时 63%），文本从「再说清楚点吧」变为完整句 | A14 通过 |
+
+### 8c. 本地 fresh-context CR 后的修订（2026-10-28）
+
+| 发现 | 处置 |
+|---|---|
+| P1-1 纯 ASCII 热词无词边界（`AI` 命中 `email`） | `_term_hits` 对 ASCII 词加 `(?<![a-z0-9_-])…(?![a-z0-9_-])`，与 corrections 同口径 |
+| P1-2 假阳性会直接丢内容，spec R3 描述不实 | 新增 `hotword_dominated`：重转仍命中时只有「热词主导」才丢，否则保留；R3 与 README 同步改写 |
+| P2-1 阈值已低于 0.1 仍重跑 | 加 `RETRY_THRESHOLD < options.threshold` 守卫 |
+| P2-2 `retried` 只表示「重跑成功」 | 改为表示「尝试过重跑」，同步改测试与 §4.1 |
+| P2-3 disabled 路径也写 `echo_guard` | 以实现为准（disabled 仍转写），更新 §4.1 |
+| P2-4 整段 RMS 被单个咔哒声骗过 | 改为 `loud_frame_count`：20 ms 帧计数 ≥ 5 才重跑 |
+| P2-5 规则 (c) 无长度上限 | 保留（长序列仍值得重转），丢弃由 `hotword_dominated` 兜住 |
+| P2-6 `_with_threshold` 兜底丢字段 | 补齐 `min_silence_duration_ms` 拷贝 |
+| P2-8 重转保留 `hotwords` | 重转剔除 `hotwords`（`_without_hotwords`） |
+| P2-9 commit scope 只写 vad | 合并为 `feat(vad,terms): …` |

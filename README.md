@@ -200,6 +200,25 @@ All settings with their defaults and how to change them:
 | `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | Paste key combo for the Wayland paste method (terminal convention; use `ctrl+v` for apps like VS Code that only bind plain paste) | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_PASTE_COMBO=ctrl+v` |
 | `VOICE_INPUT_RESIDENT` | `1` (on) | Keep a resident transcription worker: the model stays loaded across dictations (prewarmed at daemon start). `0` = legacy per-dictation spawn (model reloaded every dictation) | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_RESIDENT=0` |
 | `VOICE_INPUT_VAD` | `1` (on) | Trim leading/trailing and long internal silence before transcription (Silero VAD bundled with faster-whisper), so Whisper never decodes silence. `0` = legacy behavior | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_VAD=0` |
+| `VOICE_INPUT_VAD_THRESHOLD` | `0.3` | Silero speech-probability cutoff. `0.5` (the old default) cut real speech whose per-frame score landed in the 0.3–0.5 band; `0.3` recovered it with no false positives on existing samples (#43) | `systemctl --user edit voice-hold` drop-in, e.g. `Environment=VOICE_INPUT_VAD_THRESHOLD=0.4` |
+| `VOICE_INPUT_VAD_PAD_MS` | `400` | Padding kept around each detected speech span | drop-in, e.g. `Environment=VOICE_INPUT_VAD_PAD_MS=600` |
+| `VOICE_INPUT_VAD_MIN_SILENCE_MS` | `2000` | Only silences longer than this split speech spans / get trimmed inside a recording | drop-in, e.g. `Environment=VOICE_INPUT_VAD_MIN_SILENCE_MS=1000` |
+
+### Quiet speech and prompt echoes
+
+Soft speech is handled by two safety nets on top of the VAD cutoff. When VAD reports
+"no speech" but the recording is louder than −58 dBFS (i.e. not just room noise), the
+detector runs once more at `threshold=0.1`: breathy whispering scores ≤0.08 even at
+0.15, so only a much lower cutoff can recover it, and the energy gate keeps pure
+silence from being treated as speech.
+
+The hotword list is injected as Whisper's `initial_prompt`, and a very short fragment
+can make the decoder read that prompt back instead of transcribing (observed: the same
+four hotwords nineteen times). If a transcript repeats a hotword ≥4 times — or repeats
+several of them in a short text, or repeats the hotword sequence — it is treated as an
+echo: the prompt is dropped and the audio is transcribed again; if the echo persists the
+result is empty rather than a page of hotwords. The decision is recorded in the archive
+index as `vad.echo_guard` (`none` / `retried` / `dropped`).
 
 ### Recording archive
 

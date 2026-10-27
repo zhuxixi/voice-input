@@ -173,6 +173,21 @@ systemctl --user enable --now voice-hold.service
 | `VOICE_INPUT_PASTE_COMBO` | `ctrl+shift+v` | paste 方式的组合键（终端惯例；VS Code 等只认 `ctrl+v` 的应用改这个） | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_PASTE_COMBO=ctrl+v` |
 | `VOICE_INPUT_RESIDENT` | `1`（开） | 常驻转写 worker：模型跨听写常驻（daemon 启动即预热）。`0` = 退回旧的每次听写 spawn（每次都重新加载模型） | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_RESIDENT=0` |
 | `VOICE_INPUT_VAD` | `1`（开） | 转写前用 Silero VAD（模型随 faster-whisper 分发）裁掉首尾与段内长静音，避免 Whisper 解码静音。`0` = 旧行为 | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_VAD=0` |
+| `VOICE_INPUT_VAD_THRESHOLD` | `0.3` | Silero 语音概率判定线。旧默认 `0.5` 会裁掉概率落在 0.3–0.5 带的真实语音；`0.3` 能把它们救回来，且在现有样本上零误报（#43） | `systemctl --user edit voice-hold` 加 drop-in，如 `Environment=VOICE_INPUT_VAD_THRESHOLD=0.4` |
+| `VOICE_INPUT_VAD_PAD_MS` | `400` | 每个语音段前后保留的缓冲毫秒数 | drop-in，如 `Environment=VOICE_INPUT_VAD_PAD_MS=600` |
+| `VOICE_INPUT_VAD_MIN_SILENCE_MS` | `2000` | 只有长于这个值的静音才切分语音段／被裁掉 | drop-in，如 `Environment=VOICE_INPUT_VAD_MIN_SILENCE_MS=1000` |
+
+### 轻声与词表回声
+
+轻声说话有两条兜底。VAD 判定「没有语音」但录音电平高于 −58 dBFS（说明不是纯底噪）时，
+会用 `threshold=0.1` 再检测一次：气声耳语的逐帧概率峰值只有 0.08，0.15 都救不回来，只有
+大幅降阈值才行；而能量门槛保证纯静音不会被当成语音送进模型。
+
+热词是以 Whisper 的 `initial_prompt` 注入的，极短的语音残片会让解码器「回读」这段 prompt，
+而不是转写音频（实测同一组四个热词重复十九遍）。如果转写结果里某个热词重复 ≥4 次、短文本里
+多个热词各重复 ≥2 次、或热词序列整体周期性重复，就判定为回声：丢掉 prompt 重转一次；若仍
+命中则返回空串，而不是把一页热词灌进你的文档。判定结果记在归档索引的 `vad.echo_guard` 里
+（`none` / `retried` / `dropped`）。
 
 ### 录音归档
 

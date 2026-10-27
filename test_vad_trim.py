@@ -1,5 +1,6 @@
 """A1-A10 (#32): silence trimming for transcription."""
 
+import array
 import os
 import shutil
 import struct
@@ -314,3 +315,148 @@ class TestStats(unittest.TestCase):
     def test_degraded_error(self):
         stats = self.collect(detector=self.detector(error=ValueError("boom")))
         self.assertEqual((stats["status"], stats["reason"]), ("degraded", "error"))
+
+
+@unittest.skipUnless(HAS_VAD, "needs faster-whisper for VadOptions")
+class TestOptionsFromEnv(unittest.TestCase):
+    """#43 A1/A2: env-driven VadOptions with fail-safe parsing."""
+
+    def test_defaults(self):
+        options = vad_trim.default_vad_options()
+        self.assertEqual(options.threshold, 0.3)
+        self.assertEqual(options.speech_pad_ms, 400)
+        self.assertEqual(options.min_silence_duration_ms, 2000)
+
+    def test_env_overrides(self):
+        options = vad_trim.vad_options_from_env({
+            "VOICE_INPUT_VAD_THRESHOLD": "0.4",
+            "VOICE_INPUT_VAD_PAD_MS": "600",
+            "VOICE_INPUT_VAD_MIN_SILENCE_MS": "1000",
+        })
+        self.assertEqual((options.threshold, options.speech_pad_ms,
+                          options.min_silence_duration_ms), (0.4, 600, 1000))
+
+    def test_bad_values_fall_back(self):
+        for raw, expected in (("abc", 0.3), ("", 0.3), (None, 0.3),
+                              ("-0.2", 0.3), ("1.5", 0.3), ("0", 0.3)):
+            with self.subTest(raw=raw):
+                options = vad_trim.vad_options_from_env(
+                    {"VOICE_INPUT_VAD_THRESHOLD": raw})
+                self.assertEqual(options.threshold, expected)
+        options = vad_trim.vad_options_from_env({"VOICE_INPUT_VAD_PAD_MS": "x"})
+        self.assertEqual(options.speech_pad_ms, 400)
+
+    def test_parse_number(self):
+        self.assertEqual(vad_trim.parse_number("2.5", 1.0), 2.5)
+        self.assertEqual(vad_trim.parse_number(None, 1.0), 1.0)
+        self.assertEqual(vad_trim.parse_number("5", 1, int), 5)
+        self.assertEqual(vad_trim.parse_number("5.5", 1, int), 1)
+
+
+class TestRmsDbfs(unittest.TestCase):
+    """#43 A5: energy measurement used by the retry gate."""
+
+    def frames(self, amplitude, count=1000):
+        return array.array("h", [amplitude] * count).tobytes()
+
+    def test_full_scale_is_zero_db(self):
+        self.assertAlmostEqual(vad_trim.rms_dbfs(self.frames(32767)), 0.0, delta=0.1)
+
+    def test_tenth_scale_is_minus_20_db(self):
+        self.assertAlmostEqual(vad_trim.rms_dbfs(self.frames(3277)), -20.0, delta=0.2)
+
+    def test_digital_silence_is_minus_inf(self):
+        self.assertEqual(vad_trim.rms_dbfs(self.frames(0)), float("-inf"))
+
+    def test_empty_frames(self):
+        self.assertEqual(vad_trim.rms_dbfs(b""), float("-inf"))
+
+
+class TestEnergyRetry(unittest.TestCase):
+    """#43 A3/A3b/A4: floor-gated retry at a lower threshold."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="vad-retry-test-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.wav = os.path.join(self.dir, "in.wav")
+        make_wav(self.wav, seconds=1.0)          # amplitude 1200 -> well above floor
+
+    def install(self, mapping, fail_at=None):
+        calls = []
+
+        def fake(path, vad_options=None):
+            threshold = getattr(vad_options, "threshold", None)
+            calls.append(threshold)
+            if fail_at is not None and threshold == fail_at:
+                raise RuntimeError("retry blew up")
+            return read_frames(path), mapping.get(threshold, [])
+
+        patcher = mock.patch.object(vad_trim, "spans_from_wav", fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    def run_trim(self):
+        stats = {}
+        with vad_trim.trimmed_wav(self.wav, stats=stats, log=lambda m: None) as src:
+            self.src = src
+        return stats
+
+    def test_retry_recovers_quiet_speech(self):
+        calls = self.install({0.3: [], 0.1: [(0, SR)]})
+        stats = self.run_trim()
+        self.assertEqual(calls, [0.3, 0.1])
+        self.assertEqual((stats["status"], stats["retried"]), ("kept", True))
+        self.assertEqual(stats["threshold"], 0.1)
+        self.assertEqual(self.src, self.wav)
+
+    def test_retry_still_empty_stays_no_speech_but_records_attempt(self):
+        calls = self.install({0.3: [], 0.1: []})
+        stats = self.run_trim()
+        self.assertEqual(calls, [0.3, 0.1])
+        # `retried` means "a retry was attempted" so archives can tell
+        # "never retried" from "retried and still nothing" (#43 review P2-2).
+        self.assertEqual((stats["status"], stats["retried"]), ("no_speech", True))
+        self.assertIsNone(self.src)
+
+    def test_silence_never_retries(self):
+        make_wav(self.wav, seconds=1.0)
+        with wave.open(self.wav, "wb") as w:      # ~-70 dBFS: below the floor
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SR)
+            w.writeframes(array.array("h", [10] * SR).tobytes())
+        calls = self.install({0.3: []})
+        stats = self.run_trim()
+        self.assertEqual(calls, [0.3])
+        self.assertEqual((stats["status"], stats["retried"]), ("no_speech", False))
+        self.assertIsNone(self.src)
+
+    def test_single_click_does_not_open_the_gate(self):
+        with wave.open(self.wav, "wb") as w:      # 3s of -70 dBFS + one 20ms transient
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SR)
+            frames = array.array("h", [10] * (SR * 3))
+            start = SR
+            frames[start:start + 320] = array.array("h", [20000] * 320)
+            w.writeframes(frames.tobytes())
+        calls = self.install({0.3: []})
+        stats = self.run_trim()
+        self.assertEqual(calls, [0.3], "a transient must not justify a retry")
+        self.assertEqual(stats["status"], "no_speech")
+
+    def test_retry_skipped_when_threshold_is_already_lower(self):
+        calls = self.install({0.05: [(0, SR)]})
+        stats = {}
+        with vad_trim.trimmed_wav(self.wav, stats=stats, log=lambda m: None,
+                                  vad_options=vad_trim._PlainOptions(threshold=0.05)) as src:
+            self.src = src
+        self.assertEqual(calls, [0.05])
+        self.assertEqual(stats["status"], "kept")
+
+    def test_retry_error_degrades(self):
+        self.install({0.3: []}, fail_at=0.1)
+        stats = self.run_trim()
+        self.assertEqual((stats["status"], stats["reason"]), ("degraded", "error"))
+        self.assertEqual(self.src, self.wav)
