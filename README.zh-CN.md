@@ -16,6 +16,7 @@ Linux 语音输入工具 — 按住快捷键录音，松开即转写并输入到
 - [功能](#功能)
 - [依赖](#依赖)
 - [安装](#安装)
+- [重装恢复](#重装恢复)
 - [使用](#使用)
 - [配置](#配置)
 - [工作原理](#工作原理)
@@ -67,6 +68,40 @@ python3 -m venv venv
 ```
 
 > 脚本运行时自动推导自身位置——克隆到任意目录即可运行。
+>
+> NPU 引擎（Arch + Intel AI Boost）：改用**锁定版本**依赖——
+> `uv venv venv && uv pip sync requirements.lock --python venv/bin/python`。
+> 全程不碰 pip（uv 建的 venv 里没有 pip 模块）；requirements.lock 固化了
+> NPU 管线验证过的精确版本。
+
+## 重装恢复
+
+在全新 Arch（KDE Wayland）上重建 NPU 环境。本仓携带代码和锁定依赖；机器本地文件（热词
+`terms.json`、部署版 `voice-hold`/`ydotool` systemd 单元、uinput udev 规则）存在私有 chezmoi
+仓里，由 `chezmoi init --apply` 恢复。
+
+```bash
+# 0. 前置：NPU 驱动 >= 1.38（AUR intel-npu-driver-bin）、系统包
+#    python gtk3 gtk-layer-shell ydotool + uv ——见上方「依赖」和 NPU 引擎章节
+
+# 1. 代码 + 锁定依赖
+git clone https://github.com/zhuxixi/voice-input.git ~/work/git-repo/voice-input
+cd ~/work/git-repo/voice-input
+uv venv venv && uv pip sync requirements.lock --python venv/bin/python
+
+# 2. 模型（OpenVINO whisper-small-int8-ov）
+./download-model.sh
+
+# 3. 机器本地配置来自私有 chezmoi 仓
+#    （terms.json + voice-hold.service + drop-in + uinput udev 自愈脚本）
+chezmoi init --apply <私有-chezmoi-仓>
+
+# 4. 服务：ydotool 用户单元随包安装，drop-in 与 voice-hold 来自第 3 步
+systemctl --user daemon-reload
+systemctl --user enable --now ydotool.service voice-hold.service
+
+# 5. 首次听写需一次性 ~155 秒 NPU 编译（见 NPU 引擎说明）
+```
 
 ## 使用
 
