@@ -17,6 +17,7 @@ leaves your machine.
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [Restore after Reinstall](#restore-after-reinstall)
 - [Usage](#usage)
 - [Configuration](#configuration)
 - [How It Works](#how-it-works)
@@ -79,6 +80,42 @@ python3 -m venv venv
 ```
 
 > Scripts derive their own location at runtime — clone the repo anywhere and run.
+>
+> NPU engine (Arch + Intel AI Boost): install the **locked** dependency set instead —
+> `uv venv venv && uv pip sync requirements.lock --python venv/bin/python`.
+> No pip involved (a `uv`-created venv has no pip module); `requirements.lock`
+> pins the exact versions the NPU pipeline was verified with.
+
+## Restore after Reinstall
+
+Rebuild the NPU setup on a fresh Arch install (KDE Wayland). This repo carries the
+code and the locked deps; machine-local files (hotword `terms.json`, the deployed
+`voice-hold`/`ydotool` systemd units, and the uinput udev rule) live in a private
+chezmoi repo and are restored by `chezmoi init --apply`.
+
+```bash
+# 0. Prereqs: NPU driver >= 1.38 (AUR intel-npu-driver-bin), system packages
+#    python gtk3 gtk-layer-shell ydotool + uv — see Requirements and NPU engine above
+
+# 1. Code + locked dependencies
+git clone https://github.com/zhuxixi/voice-input.git ~/work/git-repo/voice-input
+cd ~/work/git-repo/voice-input
+uv venv venv && uv pip sync requirements.lock --python venv/bin/python
+
+# 2. Model (OpenVINO whisper-small-int8-ov)
+./download-model.sh
+
+# 3. Machine-local configs from the private chezmoi repo
+#    (terms.json + voice-hold.service + drop-ins + uinput udev self-heal script)
+chezmoi init --apply <private-chezmoi-repo>
+
+# 4. Services: ydotool user unit ships with the package; drop-in and voice-hold
+#    come from step 3
+systemctl --user daemon-reload
+systemctl --user enable --now ydotool.service voice-hold.service
+
+# 5. First dictation pays a one-time ~155 s NPU compile (see NPU engine notes)
+```
 
 ## Usage
 
