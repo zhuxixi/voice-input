@@ -2,15 +2,16 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%28X11%29-lightgrey.svg)](#requirements)
-[![CUDA](https://img.shields.io/badge/engine-CUDA%20%2B%20faster--whisper-76b900.svg)](#model-notes)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%28X11%20%C2%B7%20KDE%20Wayland%29-lightgrey.svg)](#requirements)
+[![Engine](https://img.shields.io/badge/engine-CUDA%20%C2%B7%20CPU%20%C2%B7%20NPU-76b900.svg)](#model-notes)
 
 **English** | [简体中文](README.zh-CN.md)
 
 Push-to-talk voice input for Linux: hold a hotkey to record, release to transcribe
 locally with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on your GPU,
 and the text is typed into whatever window you were using. 100% offline — nothing
-leaves your machine.
+leaves your machine. Multi-engine selectable (`VOICE_INPUT_ENGINE`): CUDA (default),
+CPU fallback, or Intel NPU via openvino-genai.
 
 ## Table of Contents
 
@@ -34,8 +35,9 @@ leaves your machine.
 - **Instant typing**: the transcript is pasted automatically into the window that was
   active when you started recording
 - **On-screen overlay**: red "● REC" while recording, blue "DONE" when finished
-- **GPU accelerated**: faster-whisper large-v3 on CUDA; the model stays resident in
-  VRAM, so transcription after key release is nearly instantaneous
+- **Multi-engine**: CUDA + faster-whisper large-v3 by default (model resident in
+  VRAM, near-instant transcription after key release); CPU fallback (no GPU needed);
+  Intel NPU via openvino-genai stateful pipeline (#27) — hotwords work on every engine
 - **Chinese & mixed Chinese/English speech** (transcription is pinned to
   `language="zh"`)
 - **Custom vocabulary (hotwords)**: bias recognition toward your jargon via a simple
@@ -52,11 +54,17 @@ daemon and `transcribe_once.py` is stored locally under
 
 ## Requirements
 
-- Linux with X11 (tested on Ubuntu 24.04)
-- NVIDIA GPU + CUDA
+- Linux with X11 (tested on Ubuntu 24.04) or KDE Wayland (tested on Plasma 6.7.5 /
+  Arch); GNOME Wayland untested (see #36)
+- Engine dependency, pick one route:
+  - **CUDA route** (default): NVIDIA GPU + CUDA
+  - **CPU route**: no GPU required — faster-whisper runs on CPU (`int8`)
+  - **NPU route**: Intel NPU (AI Boost) + driver ≥ 1.38.0 — see
+    [NPU engine](#npu-engine-intel-ai-boost-eg-lunar-lake) for prerequisites
 - Python 3.12
 - ALSA (`arecord`) and PipeWire (capture goes through the `default` source)
-- `xdotool`, `xsel`
+- `xdotool`, `xsel` (X11 only; Wayland uses ydotool + wl-clipboard instead — see
+  [Wayland (KDE)](#wayland-kde--hold-to-talk-via-voice_holdpy))
 - GTK3 (`gi`) on the system Python
 - `gtk-layer-shell` (Arch `extra`; 0.10.1 tested KDE Plasma 6.7.5) — keeps the
   hold overlay visible over full-screen windows. Missing package or non-Wayland
@@ -257,9 +265,11 @@ carry hotwords), plus ~1.4s model load per dictation. (The `bench/npu-bench.py`
 script still measures the old static pipeline, so its numbers differ from this
 engine path.)
 
-Prerequisites (all three):
+Prerequisites (all four):
 
 - NPU driver ≥ 1.38.0 (`intel-npu-driver-bin`; older drivers fail at graph import)
+- `render` group membership for `/dev/accel/accel0` access:
+  `sudo usermod -aG render $USER` — log out and back in for it to apply
 - `openvino` + `openvino-genai` in the venv (`venv/bin/pip install openvino openvino-genai`)
 - `LD_LIBRARY_PATH` containing `/usr/lib/x86_64-linux-gnu` **at process start** —
   voice-ptt.sh / voice-toggle.sh / voice_hold inject it automatically. For direct
@@ -319,7 +329,7 @@ Notes:
   faster-whisper's `hotwords` parameter.
 - **`corrections`** — deterministic wrong→right replacements applied after
   transcription (#33): the safety net hotwords can't provide for stable
-  mishearings (`skill`→`sql`, `pjob`→`批诏`). Keys containing only
+  mishearings (misheard `sql` corrected to `skill`, `批诏` to `pjob`). Keys containing only
   `[A-Za-z0-9_-]` match whole words case-insensitively; all other keys match as
   literals. One pass, longest key first, no chaining; empty value deletes.
   Applied on every engine before the text is delivered/archived.
@@ -358,6 +368,11 @@ Use `arecord -l` only to troubleshoot raw devices, not to pick the capture devic
 |---|---|
 | `voice-ptt.sh` | Launcher: sets CUDA library paths, runs with system Python + venv packages |
 | `voice-ptt.py` | Main program: push-to-talk, GTK overlay, transcription, typing |
+| `engine.py` | Engine dispatch single source of truth: `VOICE_INPUT_ENGINE` (cpu/cuda/npu) selection and fallback (#16/#19) |
+| `transcribe_once.py` | CLI transcription entry: one-shot transcribe with terms/VAD/archive wiring (used by the hold daemon) |
+| `vad_trim.py` | Silero VAD silence trimming before transcription (#32/#43) |
+| `transcribe_guard.py` | Hotword echo guard: detects prompt-echo loops and retries without the prompt (#43) |
+| `transcribe_worker.py` / `worker_supervisor.py` / `worker_protocol.py` | Resident transcription worker (#25): worker subprocess, liveness supervisor, and their IPC protocol |
 | `terms.py` | Hotwords: loads `terms.json`, builds `initial_prompt` + transcribe kwargs |
 | `archive.py` | Archives each recording (audio + transcript) under `~/.local/share/voice-input/recordings/` with an `index.jsonl` index |
 | `media_pause.py` | Pauses/resumes MPRIS media via D-Bus; zero extra dependencies |
@@ -366,8 +381,8 @@ Use `arecord -l` only to troubleshoot raw devices, not to pick the capture devic
 | `voice_hold.py` / `contrib/voice-hold.service` | Wayland hold-to-talk daemon (evdev listener + GTK indicator) and its systemd user unit (#18) |
 | `test-mic.sh` | Microphone test |
 | `download-model.sh` / `download-model.py` | Model download (hf-mirror.com mirror + DoH DNS workaround for polluted DNS) |
-| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` / `test_paste.py` / `test_hold.py` | Unit tests (stdlib `unittest`) |
-| `bench/` | NPU/CPU transcription benchmark tool + archived results (`npu-bench.py`, #17) |
+| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` / `test_paste.py` / `test_hold.py` / `test_engine.py` / `test_vad_trim.py` / `test_transcribe_guard.py` / `test_transcribe_worker.py` / `test_worker_protocol.py` / `test_worker_supervisor.py` | Unit tests (stdlib `unittest`; 12 modules) |
+| `bench/` | NPU/CPU transcription benchmark + hold-latency benchmark and archived results (`npu-bench.py` #17, `hold-latency.py` #25) |
 | `docs/` | Design documents (mostly Chinese; the newer `superpowers/` plans are English) |
 
 ## Model Notes
@@ -428,6 +443,10 @@ The author's setup, for reference:
 
 - [x] **Custom vocabulary** — soft hotwords via `initial_prompt` (#4). Possible
   follow-up: post-processing correction for known misrecognitions.
+- [x] **Multi-engine selectable** — cpu/cuda/npu via `VOICE_INPUT_ENGINE` (#16/#19;
+  NPU hotwords via stateful pipeline #27).
+- [x] **Wayland support** — KDE hold-to-talk daemon + ydotool paste + layer-shell
+  overlay (#18/#24). GNOME Wayland tracked in #36.
 - **Punctuation**: Whisper's Chinese punctuation is unstable. Options:
   [FunASR](https://github.com/modelscope/FunASR) ct-punc as a post-processing step,
   or SenseVoice-Small (punctuation built in, see below).

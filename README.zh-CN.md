@@ -2,14 +2,14 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%28X11%29-lightgrey.svg)](#依赖)
-[![CUDA](https://img.shields.io/badge/engine-CUDA%20%2B%20faster--whisper-76b900.svg)](#关于模型)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%28X11%20%C2%B7%20KDE%20Wayland%29-lightgrey.svg)](#依赖)
+[![Engine](https://img.shields.io/badge/engine-CUDA%20%C2%B7%20CPU%20%C2%B7%20NPU-76b900.svg)](#关于模型)
 
 [English](README.md) | **简体中文**
 
 Linux 语音输入工具 — 按住快捷键录音，松开即转写并输入到当前窗口。
 
-基于 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)（CTranslate2）+ CUDA GPU 加速，**完全本地离线**转写，数据不出本机。
+基于 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)（CTranslate2）+ CUDA GPU 加速，**完全本地离线**转写，数据不出本机。多引擎可选（`VOICE_INPUT_ENGINE`）：CUDA（默认）、CPU 兜底、Intel NPU（经 openvino-genai）。
 
 ## 目录
 
@@ -32,7 +32,7 @@ Linux 语音输入工具 — 按住快捷键录音，松开即转写并输入到
 - **按住录音**：按住右 Command（Alt_R）键开始录音，松开自动转写
 - **即时上屏**：转写结果自动粘贴到录音时的活跃窗口
 - **屏幕提示**：录音时显示红色 "● REC"，完成后显示蓝色 "DONE"
-- **GPU 加速**：CUDA + faster-whisper large-v3，模型常驻显存，松手后转写几乎瞬时
+- **多引擎**：默认 CUDA + faster-whisper large-v3（模型常驻显存，松手后转写几乎瞬时）；CPU 兜底（无需 GPU）；Intel NPU 经 openvino-genai stateful 管线（#27）——热词全引擎可用
 - **中文及中英混合**：转写固定为 `language="zh"`，支持中文与中英混合口语
 - **自定义词汇（热词）**：通过 `terms.json` 引导专有名词识别；配置损坏自动降级，不阻断转写
 - **自动暂停媒体**：录音时自动暂停正在外放的音乐/视频（Chrome 等支持 MPRIS 的播放器），结束后自动恢复，零新依赖（走系统 D-Bus）
@@ -41,11 +41,14 @@ Linux 语音输入工具 — 按住快捷键录音，松开即转写并输入到
 
 ## 依赖
 
-- Linux X11（已测试 Ubuntu 24.04）
-- NVIDIA GPU + CUDA
+- Linux X11（已测试 Ubuntu 24.04）或 KDE Wayland（已测试 Plasma 6.7.5 / Arch）；GNOME Wayland 未测（见 #36）
+- 引擎依赖，三选一：
+  - **CUDA 路线**（默认）：NVIDIA GPU + CUDA
+  - **CPU 路线**：无需 GPU——faster-whisper 跑在 CPU（`int8`）
+  - **NPU 路线**：Intel NPU（AI Boost）+ 驱动 ≥ 1.38.0——前置见 [NPU 引擎](#npu-引擎intel-ai-boost如-lunar-lake)
 - Python 3.12
 - ALSA（`arecord`）+ PipeWire（采集走系统默认音源）
-- `xdotool`, `xsel`
+- `xdotool`, `xsel`（仅 X11；Wayland 改用 ydotool + wl-clipboard——见 [Wayland（KDE）](#waylandkde-按住说话voice_holdpy)）
 - GTK3（`gi`，系统 Python）
 - `gtk-layer-shell`（Arch `extra`，0.10.1 在 KDE Plasma 6.7.5 实测）——让 hold
   浮层盖住全屏窗口。未安装或非 Wayland 会话会静默回退普通窗口。
@@ -217,9 +220,13 @@ systemctl --user enable --now voice-hold.service
 **带词表约 1.0s / 8 秒语音**（旧静态管线约 0.3s 但带不了热词），另加每次约 1.4s
 模型加载。（`bench/npu-bench.py` 基准脚本仍测旧静态管线，数字与本引擎路径不同。）
 
-三个前置（缺一不可）：NPU 驱动 ≥ 1.38.0；venv 装 `openvino` + `openvino-genai`；
-进程启动时 `LD_LIBRARY_PATH` 含 `/usr/lib/x86_64-linux-gnu`（三个 wrapper 与
-voice_hold 会自动注入；手工跑 CLI 需自己 export）。
+四个前置（缺一不可）：
+
+- NPU 驱动 ≥ 1.38.0（`intel-npu-driver-bin`；旧驱动在 graph import 阶段失败）
+- `render` 组成员（访问 `/dev/accel/accel0`）：`sudo usermod -aG render $USER`，注销重登生效
+- venv 装 `openvino` + `openvino-genai`（`venv/bin/pip install openvino openvino-genai`）
+- 进程启动时 `LD_LIBRARY_PATH` 含 `/usr/lib/x86_64-linux-gnu`（三个 wrapper 与
+  voice_hold 会自动注入；手工跑 CLI 需自己 export）
 
 模型是 OpenVINO 格式（与 faster-whisper 模型分开）：
 `huggingface-cli download OpenVINO/whisper-small-int8-ov`；`engine=npu` 时
@@ -251,7 +258,7 @@ transcribe_once.py 自动吃到词表。常驻转写 worker（#25）让模型跨
 
 - **`terms`**：词表列表，拼入 Whisper `initial_prompt`，引导识别你的专有名词（项目名、术语等）。容量按 token 预算（#33）：上限 `MAX_PROMPT_TOKENS = 200`，用随包 tokenizer 实测计数（中文词约可容纳 45–50 个；找不到 tokenizer 时回退旧的 30 条上限）
 - **`hotwords`**：`null`、列表或空格分隔字符串，透传给 faster-whisper 的 `hotwords` 参数
-- **`corrections`**：转写后的确定性纠错表（#33），热词治不了的稳定错字（`skill`→`sql`、`pjob`→`批诏`）由它兜底。只含 `[A-Za-z0-9_-]` 的键按整词、大小写不敏感匹配；其余键按字面量子串匹配。单趟替换、长键优先、不链式；值为空串即删除。所有引擎生效，在上屏/归档前应用
+- **`corrections`**：转写后的确定性纠错表（#33），热词治不了的稳定误识别由它兜底（误识别的 `sql` 纠正为 `skill`、`批诏` 纠正为 `pjob`）。只含 `[A-Za-z0-9_-]` 的键按整词、大小写不敏感匹配；其余键按字面量子串匹配。单趟替换、长键优先、不链式；值为空串即删除。所有引擎生效，在上屏/归档前应用
 - **健壮性**：文件缺失、格式损坏或非 UTF-8 都不会中断转写——自动降级为无热词转写并打印告警
 - **全引擎生效**：cuda/cpu（faster-whisper）与 npu（stateful 管线，#27）均支持
 
@@ -278,6 +285,11 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 |---|---|
 | `voice-ptt.sh` | 启动脚本（设置 CUDA 库路径，系统 Python + venv 包） |
 | `voice-ptt.py` | 主程序（按住录音、GTK 浮层提示、转写与上屏） |
+| `engine.py` | 引擎分发单一事实源：`VOICE_INPUT_ENGINE`（cpu/cuda/npu）选择与降级（#16/#19） |
+| `transcribe_once.py` | CLI 转写入口：单次转写，接词表/VAD/归档（hold 守护也走它） |
+| `vad_trim.py` | 转写前 Silero VAD 静音裁剪（#32/#43） |
+| `transcribe_guard.py` | 词表回声熔断：检测 prompt 回声循环，去 prompt 重转（#43） |
+| `transcribe_worker.py` / `worker_supervisor.py` / `worker_protocol.py` | 常驻转写 worker（#25）三件套：worker 子进程、活性监督、IPC 协议 |
 | `terms.py` | 热词支持：加载 `terms.json`，构造 `initial_prompt` + transcribe 参数 |
 | `archive.py` | 录音归档（音频 + 转写文本存到 `~/.local/share/voice-input/recordings/`，含 `index.jsonl` 索引） |
 | `media_pause.py` | 录音时自动暂停/恢复 MPRIS 媒体（Chrome 等），走系统 D-Bus，零依赖 |
@@ -286,8 +298,8 @@ pactl set-default-source <源名>   # 或：wpctl set-default <id>
 | `voice_hold.py` / `contrib/voice-hold.service` | Wayland 按住说话守护（evdev 监听 + GTK 指示浮层）及其 systemd user 单元（#18） |
 | `test-mic.sh` | 麦克风测试 |
 | `download-model.sh` / `download-model.py` | 模型下载（hf-mirror.com 镜像 + DoH DNS 修复，绕过 DNS 污染） |
-| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` / `test_paste.py` / `test_hold.py` | 单元测试（标准库 unittest） |
-| `bench/` | NPU/CPU 转写基准工具与结果留档（`npu-bench.py`，#17） |
+| `test_terms.py` / `test_archive.py` / `test_media_pause.py` / `test_bench.py` / `test_paste.py` / `test_hold.py` / `test_engine.py` / `test_vad_trim.py` / `test_transcribe_guard.py` / `test_transcribe_worker.py` / `test_worker_protocol.py` / `test_worker_supervisor.py` | 单元测试（标准库 unittest，共 12 个模块） |
+| `bench/` | NPU/CPU 转写基准 + hold 延迟基准与结果留档（`npu-bench.py` #17、`hold-latency.py` #25） |
 | `docs/` | 设计文档（以中文为主；较新的 `superpowers/` 计划为英文） |
 
 ## 关于模型
@@ -341,6 +353,8 @@ worker 挂死会在 `VOICE_INPUT_TRANSCRIBE_TIMEOUT` 被杀并在下一次听写
 ## Roadmap
 
 - [x] **自定义词汇**：initial_prompt 软热词已实现（#4）。后续可选：已知误识别的后处理纠错
+- [x] **多引擎可选**：cpu/cuda/npu 经 `VOICE_INPUT_ENGINE` 切换（#16/#19；NPU 热词 stateful 管线 #27）
+- [x] **Wayland 支持**：KDE 按住说话守护 + ydotool 上屏 + layer-shell 浮层（#18/#24）；GNOME Wayland 见 #36
 - **标点符号**：Whisper 中文标点支持不稳定。可选方案：[FunASR](https://github.com/modelscope/FunASR) ct-punc 后处理，或 SenseVoice-Small（内置标点，见下）
 - **SenseVoice-Small 升级**：[阿里达摩院 SenseVoice-Small](https://github.com/FunAudioLLM/SenseVoice) 是首选替代方案：
 
