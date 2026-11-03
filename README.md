@@ -10,8 +10,8 @@
 Push-to-talk voice input for Linux: hold a hotkey to record, release to transcribe
 locally with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on your GPU,
 and the text is typed into whatever window you were using. 100% offline — nothing
-leaves your machine. Multi-engine selectable (`VOICE_INPUT_ENGINE`): CUDA (default),
-CPU fallback, or Intel NPU via openvino-genai.
+leaves your machine. Multi-engine selectable (`VOICE_INPUT_ENGINE`) — see
+[Features](#features).
 
 ## Table of Contents
 
@@ -59,7 +59,7 @@ daemon and `transcribe_once.py` is stored locally under
 - Engine dependency, pick one route:
   - **CUDA route** (default): NVIDIA GPU + CUDA
   - **CPU route**: no GPU required — faster-whisper runs on CPU (`int8`)
-  - **NPU route**: Intel NPU (AI Boost) + driver ≥ 1.38.0 — see
+  - **NPU route**: Intel NPU (AI Boost) — see
     [NPU engine](#npu-engine-intel-ai-boost-eg-lunar-lake) for prerequisites
 - Python 3.12
 - ALSA (`arecord`) and PipeWire (capture goes through the `default` source)
@@ -469,7 +469,7 @@ The author's setup, for reference:
 ## Testing
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim test_transcribe_guard -v
 venv/bin/python3 -m unittest test_engine -v   # engine/CUDA contract (needs numpy in process)
 venv/bin/python3 -m unittest test_vad_trim -v   # VAD cases (TestSpeechSpans / TestEndToEnd)
 ```

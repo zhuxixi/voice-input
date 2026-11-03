@@ -9,7 +9,7 @@
 
 Linux 语音输入工具 — 按住快捷键录音，松开即转写并输入到当前窗口。
 
-基于 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)（CTranslate2）+ CUDA GPU 加速，**完全本地离线**转写，数据不出本机。多引擎可选（`VOICE_INPUT_ENGINE`）：CUDA（默认）、CPU 兜底、Intel NPU（经 openvino-genai）。
+基于 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)（CTranslate2）+ CUDA GPU 加速，**完全本地离线**转写，数据不出本机。多引擎可选（`VOICE_INPUT_ENGINE`），见[功能](#功能)。
 
 ## 目录
 
@@ -45,7 +45,7 @@ Linux 语音输入工具 — 按住快捷键录音，松开即转写并输入到
 - 引擎依赖，三选一：
   - **CUDA 路线**（默认）：NVIDIA GPU + CUDA
   - **CPU 路线**：无需 GPU——faster-whisper 跑在 CPU（`int8`）
-  - **NPU 路线**：Intel NPU（AI Boost）+ 驱动 ≥ 1.38.0——前置见 [NPU 引擎](#npu-引擎intel-ai-boost如-lunar-lake)
+  - **NPU 路线**：Intel NPU（AI Boost）——前置见 [NPU 引擎](#npu-引擎intel-ai-boost如-lunar-lake)
 - Python 3.12
 - ALSA（`arecord`）+ PipeWire（采集走系统默认音源）
 - `xdotool`, `xsel`（仅 X11；Wayland 改用 ydotool + wl-clipboard——见 [Wayland（KDE）](#waylandkde-按住说话voice_holdpy)）
@@ -374,7 +374,7 @@ worker 挂死会在 `VOICE_INPUT_TRANSCRIBE_TIMEOUT` 被杀并在下一次听写
 ## 测试
 
 ```bash
-python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim -v
+python3 -m unittest test_terms test_archive test_media_pause test_bench test_paste test_hold test_worker_protocol test_worker_supervisor test_transcribe_worker test_vad_trim test_transcribe_guard -v
 venv/bin/python3 -m unittest test_engine -v   # 引擎/CUDA 契约（需要进程内有 numpy）
 venv/bin/python3 -m unittest test_vad_trim -v   # VAD 用例（TestSpeechSpans / TestEndToEnd）
 ```
